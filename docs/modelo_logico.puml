@@ -1,0 +1,73 @@
+@startuml modelo_logico
+!theme plain
+hide circle
+skinparam linetype ortho
+skinparam classAttributeIconSize 0
+
+entity "users" as users {
+  * user_id : INTEGER <<PK>>
+}
+
+entity "movies" as movies {
+  * movie_id : INTEGER <<PK>>
+  --
+  * title : VARCHAR(500)
+  release_year : SMALLINT
+  --
+  CHECK (release_year BETWEEN 1880 AND 2100)
+}
+
+entity "genres" as genres {
+  * genre_id : INTEGER <<PK>>
+  --
+  * name : VARCHAR(50) <<UK>>
+}
+
+entity "movie_genres" as movie_genres {
+  * movie_id : INTEGER <<PK, FK>>
+  * genre_id : INTEGER <<PK, FK>>
+}
+
+entity "movie_links" as movie_links {
+  * movie_id : INTEGER <<PK, FK>>
+  --
+  imdb_id : VARCHAR(20)
+  tmdb_id : INTEGER
+}
+
+entity "tags" as tags {
+  * tag_id : INTEGER <<PK>>
+  --
+  * tag_name : VARCHAR(255) <<UK>>
+}
+
+entity "user_movie_tags" as user_movie_tags {
+  * user_id : INTEGER <<PK, FK>>
+  * movie_id : INTEGER <<PK, FK>>
+  * tag_id : INTEGER <<PK, FK>>
+  * tagged_at : TIMESTAMP <<PK>>
+}
+
+entity "ratings" as ratings {
+  * user_id : INTEGER <<PK, FK>>
+  * movie_id : INTEGER <<PK, FK>>
+  --
+  * rating : NUMERIC(2,1)
+  * rated_at : TIMESTAMP
+  --
+  CHECK (rating BETWEEN 0.5 AND 5.0)
+}
+
+movies  ||--o| movie_links     : "1:1"
+movies  ||--o{ movie_genres    : "possui"
+genres  ||--o{ movie_genres    : "classifica"
+users   ||--o{ ratings         : "avalia"
+movies  ||--o{ ratings         : "recebe"
+users   ||--o{ user_movie_tags : "atribui"
+movies  ||--o{ user_movie_tags : "recebe"
+tags    ||--o{ user_movie_tags : "categoriza"
+
+note bottom of ratings
+  Todas as FKs: ON DELETE CASCADE
+end note
+@enduml
