@@ -25,6 +25,7 @@ BancoDeDados/
 │   ├── test_sql_queries.py         # Executa e exibe as consultas SQL
 │   ├── test_graph_queries.py       # Executa e exibe as consultas Cypher
 │   ├── benchmark.py                # Mede o tempo das consultas nos dois bancos
+│   ├── build_similarity.py         # Pré-calcula a similaridade entre filmes como aresta SIMILAR
 │   └── common.py                   # Conexões e funções compartilhadas
 ├── docs/
 │   ├── analise.md                  # Relatório técnico completo
@@ -70,6 +71,7 @@ python scripts/test_sql_queries.py
 # Grafo
 python scripts/load_neo4j.py --sample-ratings 100000
 python scripts/test_graph_queries.py
+python scripts/build_similarity.py   # opcional: pré-calcula as arestas (:Movie)-[:SIMILAR]->(:Movie)
 
 # Tempos (gera docs/resultados_benchmark.md)
 python scripts/benchmark.py
