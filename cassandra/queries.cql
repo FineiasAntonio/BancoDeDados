@@ -19,10 +19,12 @@ FROM movielens.movie_stats WHERE movie_id = 1;
 
 -- name: c2_top10
 -- titulo: Consulta 2 - Top 10 filmes mais bem avaliados (mínimo de 50 votos)
--- O Cassandra RECUSA a versão "natural" desta consulta:
---   SELECT movie_id, avg(rating) AS media FROM movielens.ratings_by_movie
---   GROUP BY movie_id ORDER BY media DESC LIMIT 10;
---   -> InvalidRequest: ORDER BY is only supported when the partition key is restricted by an EQ or an IN.
+-- O CQL não tem como fazer esta consulta na hora:
+--   SELECT movie_id, avg(rating) FROM movielens.ratings_by_movie
+--   GROUP BY movie_id ORDER BY avg(rating) DESC LIMIT 10;
+--   -> SyntaxException: ORDER BY não aceita agregações, só colunas de ordenação (clustering);
+--   e mesmo ORDER BY rated_at falha: "ORDER BY is only supported when the partition key
+--   is restricted by an EQ or an IN" (só se ordena dentro de uma partição).
 -- Por isso o ranking é calculado na carga e lido pronto, já ordenado, de uma única partição.
 SELECT movie_id, title, release_year, vote_count, avg_rating
 FROM movielens.top_movies WHERE bucket = 'all' LIMIT 10;

@@ -183,13 +183,19 @@ ORDER BY AVG(r.rating) DESC, vote_count DESC, m.movie_id
 LIMIT 10;
 ```
 
-A versão "natural" no Cassandra é **recusada**:
+No Cassandra, essa consulta **não pode ser feita na hora**:
 
 ```sql
-SELECT movie_id, avg(rating) AS media FROM movielens.ratings_by_movie
-GROUP BY movie_id ORDER BY media DESC LIMIT 10;
--- InvalidRequest: ORDER BY só é permitido quando a chave de partição está restrita por = ou IN
+SELECT movie_id, avg(rating) FROM movielens.ratings_by_movie
+GROUP BY movie_id ORDER BY avg(rating) DESC LIMIT 10;
+-- erro de sintaxe: ORDER BY não aceita agregações, só colunas de ordenação
+
+SELECT movie_id, avg(rating) FROM movielens.ratings_by_movie
+GROUP BY movie_id ORDER BY rated_at DESC LIMIT 10;
+-- InvalidRequest: ORDER BY is only supported when the partition key is restricted by an EQ or an IN.
 ```
+
+O `ORDER BY` do CQL só ordena linhas **dentro de uma partição**, e só pelas colunas de ordenação. Não existe ordenar pelo resultado de uma agregação.
 
 O que funciona é ler o ranking pré-calculado:
 
@@ -274,7 +280,7 @@ WHERE movie_id = 1
   AND rated_at <  '2015-02-01 00:00:00+0000';
 ```
 
-* Faixa contínua dentro da partição do filme. Filtrar por qualquer coluna que não seja da chave (por exemplo, `rating = 5`) seria recusado, a não ser com `ALLOW FILTERING`, que lê tudo e é desaconselhado.
+* Faixa contínua dentro da partição do filme. Filtrar por qualquer coluna que não seja da chave (por exemplo, `rating = 5`) é recusado ("Cannot execute this query as it might involve data filtering..."), a não ser com `ALLOW FILTERING`, que lê a partição inteira e é desaconselhado.
 
 ---
 

@@ -8,6 +8,7 @@ recusa (top 10 calculado na hora).
 --------------------------------------------------------------------------------
 """
 
+from cassandra.protocol import SyntaxException
 from cassandra import InvalidRequest
 
 from common import ROOT, connect_cassandra, load_queries
@@ -39,12 +40,17 @@ def main():
         for cols, rows in run(session, q["text"]):
             print_table(cols, rows)
 
-    print("\n>>> Tentativa: top 10 calculado na hora (GROUP BY + ORDER BY por agregação)")
-    try:
-        session.execute("SELECT movie_id, avg(rating) AS media FROM movielens.ratings_by_movie "
-                        "GROUP BY movie_id ORDER BY media DESC LIMIT 10")
-    except InvalidRequest as exc:
-        print(f"  [recusada pelo Cassandra] {exc.message if hasattr(exc, 'message') else exc}")
+    print("\n>>> Tentativas que o Cassandra recusa")
+    for cql in ("SELECT movie_id, avg(rating) FROM movielens.ratings_by_movie "
+                "GROUP BY movie_id ORDER BY avg(rating) DESC LIMIT 10",
+                "SELECT movie_id, avg(rating) FROM movielens.ratings_by_movie "
+                "GROUP BY movie_id ORDER BY rated_at DESC LIMIT 10",
+                "SELECT movie_id, rating FROM movielens.ratings_by_user WHERE user_id = 42 AND rating = 5"):
+        try:
+            session.execute(cql)
+        except (InvalidRequest, SyntaxException) as exc:
+            msg = str(exc)
+            print(f"  {cql}\n    -> {msg[msg.find('message'):][:170]}")
     cluster.shutdown()
     print("\n" + "=" * 80)
 
