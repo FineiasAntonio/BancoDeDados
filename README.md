@@ -2,7 +2,7 @@
 
 Este repositório contém a implementação, os scripts de ETL, as modelagens e a análise comparativa entre um **SGBD Relacional (PostgreSQL normalizado até a 3FN)** e um **SGBD NoSQL orientado a Grafos (Neo4j)**, usando a base pública **MovieLens 20M**.
 
-O MovieLens é, essencialmente, uma rede: usuários ligados a filmes pelas avaliações, filmes ligados a gêneros e tags. O trabalho compara os dois modelos em consultas típicas de catálogo (em que o relacional é forte) e em consultas de recomendação e caminhos (em que o grafo é forte), com tempos medidos.
+O MovieLens é, essencialmente, uma rede: usuários ligados a filmes pelas avaliações, filmes ligados a gêneros e tags. O trabalho compara os dois modelos em consultas típicas de catálogo e em consultas de recomendação, com tempos medidos.
 
 ---
 
@@ -100,9 +100,9 @@ MATCH p = (:Movie {movie_id: 1})-[:HAS_TAG]->(:Tag)<-[:HAS_TAG]-(:Movie) RETURN 
 | 2 | Top 10 filmes (mínimo de 50 votos) | Relacional (agregação global) |
 | 3 | Filmes e média por gênero | Relacional (agregação global) |
 | 4 | Filmes com as tags `pixar` / `animation` | — |
-| 5 | "Quem gostou deste também gostou de..." | Grafo (legibilidade) |
+| 5 | "Quem gostou deste também gostou de..." (2 saltos) | Grafo (legibilidade) |
 | 6 | Filmes com mais tags em comum | Grafo (vizinhança) |
-| 7 | Menor caminho entre dois filmes via tags | **Grafo** (caminho de tamanho variável) |
+| 7 | Recomendações personalizadas para um usuário (3 saltos) | Grafo (legibilidade) |
 
 ---
 

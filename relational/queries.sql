@@ -116,27 +116,30 @@ ORDER BY tags_em_comum DESC, m.movie_id
 LIMIT 10;
 
 
--- name: c7_caminho
--- titulo: Consulta 7 - Menor distância de Toy Story (1) até The Godfather (858) via tags em comum
--- Busca em largura com CTE recursiva. O UNION (sem ALL) descarta pares (filme, nível)
--- repetidos, o que mantém cada nível do tamanho do catálogo. O preço: para deduplicar não
--- dá para carregar o caminho percorrido, então só a distância é devolvida. Guardar o caminho
--- num ARRAY torna cada linha única e a consulta explode exponencialmente (cada caminho
--- distinto vira uma linha). Além disso, a CTE não para ao encontrar o destino: ela
--- calcula todos os níveis até o limite e só depois filtra.
-WITH RECURSIVE
-movie_tag AS (
-    SELECT DISTINCT movie_id, tag_id FROM user_movie_tags
-),
-busca (movie_id, nivel) AS (
-    SELECT 1, 0
-    UNION
-    SELECT b.movie_id, s.nivel + 1
-    FROM busca s
-    JOIN movie_tag a ON a.movie_id = s.movie_id
-    JOIN movie_tag b ON b.tag_id = a.tag_id
-    WHERE s.nivel < 4
+-- name: c7_recomendacao_usuario
+-- titulo: Consulta 7 - Recomendações personalizadas para o usuário 42 (3 saltos)
+-- Filtragem colaborativa: (1) acha os 20 usuários com mais filmes bem avaliados em comum
+-- com o usuário 42; (2) sugere o que esses usuários avaliaram bem e o 42 ainda não viu.
+WITH vizinhos AS (
+    SELECT r2.user_id, COUNT(*) AS em_comum
+    FROM ratings r1
+    JOIN ratings r2 ON r2.movie_id = r1.movie_id
+                   AND r2.user_id <> r1.user_id
+    WHERE r1.user_id = 42
+      AND r1.rating >= 4
+      AND r2.rating >= 4
+    GROUP BY r2.user_id
+    ORDER BY em_comum DESC, r2.user_id
+    LIMIT 20
 )
-SELECT MIN(nivel) AS distancia
-FROM busca
-WHERE movie_id = 858;
+SELECT m.movie_id, m.title, COUNT(*) AS score
+FROM vizinhos v
+JOIN ratings r3 ON r3.user_id = v.user_id AND r3.rating >= 4
+JOIN movies m   ON m.movie_id = r3.movie_id
+WHERE NOT EXISTS (
+    SELECT 1 FROM ratings ja_viu
+    WHERE ja_viu.user_id = 42 AND ja_viu.movie_id = r3.movie_id
+)
+GROUP BY m.movie_id, m.title
+ORDER BY score DESC, m.movie_id
+LIMIT 10;

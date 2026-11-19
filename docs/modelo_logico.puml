@@ -1,73 +1,90 @@
 @startuml modelo_logico
-!theme plain
+' Modelo lógico relacional (PostgreSQL, 3FN) - MovieLens
+' Gerar a imagem: java -jar plantuml.jar -tpng docs/modelo_logico.puml
+
 hide circle
+hide methods
+hide stereotypes
 skinparam linetype ortho
-skinparam classAttributeIconSize 0
+skinparam shadowing false
+skinparam dpi 200
+skinparam defaultFontName Calibri
+skinparam defaultFontSize 12
+skinparam nodesep 60
+skinparam ranksep 50
+skinparam ArrowColor #5B6578
+skinparam ArrowThickness 1.2
+skinparam ClassFontColor #FFFFFF
+left to right direction
 
-entity "users" as users {
-  * user_id : INTEGER <<PK>>
+skinparam class {
+  BackgroundColor #F4F6FA
+  BorderColor #2F6DB5
+  BorderThickness 1.2
+  HeaderBackgroundColor #2F6DB5
+  FontColor #FFFFFF
+  FontStyle bold
+  FontSize 13
+  AttributeFontColor #14213D
+  AttributeFontSize 12
 }
 
-entity "movies" as movies {
-  * movie_id : INTEGER <<PK>>
+entity "<color:#FFFFFF>users</color>" as users {
+  <color:#C0392B><b>PK</b></color>  <b>user_id</b> : INTEGER
+}
+
+entity "<color:#FFFFFF>movies</color>" as movies {
+  <color:#C0392B><b>PK</b></color>  <b>movie_id</b> : INTEGER
   --
-  * title : VARCHAR(500)
+  title : VARCHAR(500)
   release_year : SMALLINT
-  --
-  CHECK (release_year BETWEEN 1880 AND 2100)
 }
 
-entity "genres" as genres {
-  * genre_id : INTEGER <<PK>>
-  --
-  * name : VARCHAR(50) <<UK>>
-}
-
-entity "movie_genres" as movie_genres {
-  * movie_id : INTEGER <<PK, FK>>
-  * genre_id : INTEGER <<PK, FK>>
-}
-
-entity "movie_links" as movie_links {
-  * movie_id : INTEGER <<PK, FK>>
+entity "<color:#FFFFFF>movie_links</color>" as movie_links {
+  <color:#C0392B><b>PK FK</b></color>  <b>movie_id</b> : INTEGER
   --
   imdb_id : VARCHAR(20)
   tmdb_id : INTEGER
 }
 
-entity "tags" as tags {
-  * tag_id : INTEGER <<PK>>
+entity "<color:#FFFFFF>genres</color>" as genres {
+  <color:#C0392B><b>PK</b></color>  <b>genre_id</b> : INTEGER
   --
-  * tag_name : VARCHAR(255) <<UK>>
+  <color:#2E9E5B><b>UK</b></color>  name : VARCHAR(50)
 }
 
-entity "user_movie_tags" as user_movie_tags {
-  * user_id : INTEGER <<PK, FK>>
-  * movie_id : INTEGER <<PK, FK>>
-  * tag_id : INTEGER <<PK, FK>>
-  * tagged_at : TIMESTAMP <<PK>>
+entity "<color:#FFFFFF>movie_genres</color>" as movie_genres {
+  <color:#C0392B><b>PK FK</b></color>  <b>movie_id</b> : INTEGER
+  <color:#C0392B><b>PK FK</b></color>  <b>genre_id</b> : INTEGER
 }
 
-entity "ratings" as ratings {
-  * user_id : INTEGER <<PK, FK>>
-  * movie_id : INTEGER <<PK, FK>>
+entity "<color:#FFFFFF>ratings</color>" as ratings {
+  <color:#C0392B><b>PK FK</b></color>  <b>user_id</b> : INTEGER
+  <color:#C0392B><b>PK FK</b></color>  <b>movie_id</b> : INTEGER
   --
-  * rating : NUMERIC(2,1)
-  * rated_at : TIMESTAMP
-  --
-  CHECK (rating BETWEEN 0.5 AND 5.0)
+  rating : NUMERIC(2,1)
+  rated_at : TIMESTAMP
 }
 
-movies  ||--o| movie_links     : "1:1"
-movies  ||--o{ movie_genres    : "possui"
-genres  ||--o{ movie_genres    : "classifica"
-users   ||--o{ ratings         : "avalia"
-movies  ||--o{ ratings         : "recebe"
-users   ||--o{ user_movie_tags : "atribui"
-movies  ||--o{ user_movie_tags : "recebe"
-tags    ||--o{ user_movie_tags : "categoriza"
+entity "<color:#FFFFFF>tags</color>" as tags {
+  <color:#C0392B><b>PK</b></color>  <b>tag_id</b> : INTEGER
+  --
+  <color:#2E9E5B><b>UK</b></color>  tag_name : VARCHAR(255)
+}
 
-note bottom of ratings
-  Todas as FKs: ON DELETE CASCADE
-end note
+entity "<color:#FFFFFF>user_movie_tags</color>" as user_movie_tags {
+  <color:#C0392B><b>PK FK</b></color>  <b>user_id</b> : INTEGER
+  <color:#C0392B><b>PK FK</b></color>  <b>movie_id</b> : INTEGER
+  <color:#C0392B><b>PK FK</b></color>  <b>tag_id</b> : INTEGER
+  <color:#C0392B><b>PK</b></color>  <b>tagged_at</b> : TIMESTAMP
+}
+
+users   ||--o{ ratings
+ratings }o--|| movies
+movies  ||--o| movie_links
+movies  ||--o{ movie_genres
+movie_genres }o--|| genres
+users   ||--o{ user_movie_tags
+movies  ||--o{ user_movie_tags
+user_movie_tags }o--|| tags
 @enduml

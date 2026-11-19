@@ -245,7 +245,7 @@ ORDER BY score DESC, rec.movie_id LIMIT 10;
 ```
 
 * **Legibilidade**: o padrão Cypher é o desenho do próprio caminho *filme ← usuário → outro filme*. No SQL, a mesma ideia exige um *self-join* da tabela `ratings` com ela mesma, que é bem menos evidente para quem lê.
-* **Desempenho**: com 2 saltos e os índices certos (`ratings(movie_id)` e a PK que começa por `user_id`), o PostgreSQL resolve bem. A diferença de desempenho do grafo aparece com **mais saltos** — ver Consulta 7.
+* **Desempenho**: com 2 saltos e os índices certos (`ratings(movie_id)` e a PK que começa por `user_id`), o PostgreSQL resolve bem. A vantagem do grafo aqui é a legibilidade, não o tempo.
 
 ### Consulta 6: Filmes com mais tags em comum com Toy Story
 
@@ -271,38 +271,47 @@ ORDER BY tags_em_comum DESC, o.movie_id LIMIT 10;
 
 * Similaridade por vizinhança: dois filmes são parecidos se compartilham vizinhos (tags). No SQL é preciso primeiro **deduplicar** `user_movie_tags` (vários usuários aplicam a mesma tag ao mesmo filme); no grafo esse trabalho já foi feito na carga, com a aresta `HAS_TAG {count}`.
 
-### Consulta 7: Menor distância de Toy Story (1) até The Godfather (858) via tags em comum
+### Consulta 7: Recomendações personalizadas para o usuário 42 (3 saltos)
+
+* **Objetivo**: a tela "recomendados para você". Primeiro encontra os 20 usuários mais parecidos com o usuário 42 (mais filmes bem avaliados em comum); depois sugere o que esses usuários avaliaram bem e o 42 ainda não viu.
 
 ```sql
-WITH RECURSIVE
-movie_tag AS (SELECT DISTINCT movie_id, tag_id FROM user_movie_tags),
-busca (movie_id, nivel) AS (
-    SELECT 1, 0
-    UNION
-    SELECT b.movie_id, s.nivel + 1
-    FROM busca s
-    JOIN movie_tag a ON a.movie_id = s.movie_id
-    JOIN movie_tag b ON b.tag_id = a.tag_id
-    WHERE s.nivel < 4
+WITH vizinhos AS (
+    SELECT r2.user_id, COUNT(*) AS em_comum
+    FROM ratings r1
+    JOIN ratings r2 ON r2.movie_id = r1.movie_id AND r2.user_id <> r1.user_id
+    WHERE r1.user_id = 42 AND r1.rating >= 4 AND r2.rating >= 4
+    GROUP BY r2.user_id
+    ORDER BY em_comum DESC, r2.user_id
+    LIMIT 20
 )
-SELECT MIN(nivel) AS distancia FROM busca WHERE movie_id = 858;
+SELECT m.movie_id, m.title, COUNT(*) AS score
+FROM vizinhos v
+JOIN ratings r3 ON r3.user_id = v.user_id AND r3.rating >= 4
+JOIN movies m   ON m.movie_id = r3.movie_id
+WHERE NOT EXISTS (SELECT 1 FROM ratings ja_viu
+                  WHERE ja_viu.user_id = 42 AND ja_viu.movie_id = r3.movie_id)
+GROUP BY m.movie_id, m.title
+ORDER BY score DESC, m.movie_id
+LIMIT 10;
 ```
 
 ```cypher
-MATCH (a:Movie {movie_id: 1}), (b:Movie {movie_id: 858})
-MATCH p = shortestPath((a)-[:HAS_TAG*..10]-(b))
-RETURN length(p) / 2 AS distancia,
-       [n IN nodes(p) | coalesce(n.title, '#' + n.name)] AS caminho;
+MATCH (u:User {user_id: 42})-[r1:RATED]->(:Movie)<-[r2:RATED]-(outro:User)
+WHERE r1.rating >= 4 AND r2.rating >= 4
+WITH u, outro, count(*) AS em_comum
+ORDER BY em_comum DESC, outro.user_id
+LIMIT 20
+MATCH (outro)-[r3:RATED]->(rec:Movie)
+WHERE r3.rating >= 4 AND NOT (u)-[:RATED]->(rec)
+RETURN rec.movie_id, rec.title, count(*) AS score
+ORDER BY score DESC, rec.movie_id
+LIMIT 10;
 ```
 
-Esta é a consulta que melhor expõe a diferença entre os paradigmas:
-
-* **SQL não tem busca em grafo nativa**. A CTE recursiva simula uma busca em largura, mas:
-  1. **Não para ao encontrar o destino**: calcula todos os níveis até o limite (`nivel < 4`) e só depois filtra.
-  2. **Não tem um conjunto global de "já visitados"**: o `UNION` só descarta linhas idênticas `(filme, nível)`, então o mesmo filme é reprocessado em cada nível.
-  3. **Não devolve o caminho**: para isso seria preciso carregar um `ARRAY` com os filmes visitados em cada linha. Isso torna toda linha única, desativa a deduplicação do `UNION` e a consulta passa a crescer **exponencialmente** (cada caminho distinto vira uma linha). Na nossa primeira versão, com o caminho, a consulta não terminava em 60 segundos.
-* **O Neo4j executa `shortestPath` como um algoritmo nativo** (busca em largura bidirecional), que para no primeiro encontro e devolve o caminho completo, com as tags intermediárias.
-* A profundidade máxima também é diferente: 4 níveis no SQL (mais que isso fica caro) contra 10 no Cypher.
+* **Filtragem colaborativa** em 3 saltos: *usuário → filmes que ele gostou → outros usuários que gostaram dos mesmos filmes → filmes desses usuários*.
+* **Legibilidade**: no Cypher cada etapa é um padrão desenhado, e o "ainda não viu" é o padrão negativo `NOT (u)-[:RATED]->(rec)`. No SQL, a tabela `ratings` aparece **quatro vezes** (três junções e um `NOT EXISTS`), e é preciso saber que cada cópia representa um papel diferente (o usuário, os vizinhos, as sugestões, o "já viu").
+* **Desempenho**: na amostra de 100 mil avaliações, o PostgreSQL foi mais rápido. As junções são todas por índice (`ratings(user_id)` via PK e `ratings(movie_id)`) e os conjuntos intermediários são pequenos. O custo do SQL cresce com o tamanho da tabela `ratings` (cada junção é uma busca em índice B-Tree), enquanto o do grafo cresce com a vizinhança do usuário; por isso a diferença tende a diminuir com a base completa de 20 milhões, algo que não medimos.
 
 ---
 
@@ -312,13 +321,23 @@ O script [`scripts/benchmark.py`](../scripts/benchmark.py) executa cada consulta
 
 > **Preencher com os números da execução real** (`python scripts/benchmark.py`), indicando o volume de avaliações carregado (amostra de 100 mil ou base completa) e a máquina usada.
 
-O padrão esperado, observado num teste preliminar com **dados sintéticos** no formato do MovieLens (3 mil filmes, 100 mil avaliações), é:
+No teste preliminar com **dados sintéticos** no formato do MovieLens (3 mil filmes, 100 mil avaliações; média de 20 execuções):
 
-* **Consultas 1 a 4 (busca pontual e agregações)**: o **PostgreSQL** é mais rápido ou empata. Agregar sobre a base inteira favorece o armazenamento em tabelas contíguas, e as buscas pontuais são resolvidas por índices B-Tree nos dois bancos.
-* **Consultas 5 e 6 (1 a 2 saltos)**: o **PostgreSQL continua competitivo** (no teste, ficou próximo do Neo4j na 6 e foi mais rápido na 5). Com poucos saltos, junções indexadas são eficientes, e a vantagem do grafo aqui é a legibilidade da consulta, não o tempo.
-* **Consulta 7 (caminho de tamanho variável)**: o **Neo4j** é **duas ordens de grandeza** mais rápido e ainda devolve o caminho, que o SQL não consegue devolver a um custo razoável.
+| Consulta | PostgreSQL (ms) | Neo4j (ms) |
+| :--- | ---: | ---: |
+| 1 · Ficha do filme | 1,7 | 6,7 |
+| 2 · Top 10 | 56,5 | 90,5 |
+| 3 · Média por gênero | 213,4 | 232,4 |
+| 4 · Busca por tags | 1,6 | 6,5 |
+| 5 · Quem gostou também gostou | 19,9 | 39,5 |
+| 6 · Tags em comum | 13,3 | 16,6 |
+| 7 · Recomendação personalizada | 4,0 | 17,6 |
 
-A conclusão honesta é que o grafo **não** é "mais rápido" em geral: ele é mais rápido exatamente quando a pergunta é sobre **relações de profundidade variável**.
+* **O PostgreSQL foi mais rápido em todas as consultas** nessa escala. Buscas pontuais e agregações favorecem tabelas contíguas com índices B-Tree, e mesmo as consultas de recomendação (2 e 3 saltos) se resolvem com poucas junções indexadas sobre conjuntos pequenos.
+* **As consultas 3 e 6 ficaram próximas**: a diferença é da ordem da variação entre execuções.
+* **O Neo4j paga um custo fixo maior por consulta** (planejamento e protocolo Bolt) e varia mais entre execuções (JVM). Em consultas de 1 a 2 ms, esse custo fixo domina.
+
+A conclusão honesta é que, **nesta escala**, a vantagem do grafo não é o tempo de resposta, e sim a **modelagem e a legibilidade** das consultas sobre relações. A vantagem de desempenho do grafo aparece quando a travessia é longa ou de profundidade variável, ou quando a tabela de relações é grande o bastante para que cada junção pese — cenários que a amostra de 100 mil avaliações não cobre.
 
 ---
 
@@ -359,7 +378,8 @@ A conclusão honesta é que o grafo **não** é "mais rápido" em geral: ele é 
 | Relacionamentos | `JOIN` calculado na consulta | Ponteiros armazenados |
 | Linguagem | SQL (declarativa, padrão ISO) | Cypher (declarativa, baseada em padrões; base do padrão ISO GQL) |
 | Agregações sobre a base inteira | **Forte** | Mais lento |
-| Caminhos de tamanho variável | CTE recursiva, cara e limitada | **Nativo** (`shortestPath`, `*1..n`) |
+| Consultas sobre relações | Várias cópias da mesma tabela unidas por JOIN | Padrões que desenham o caminho (`(u)-[:RATED]->(m)`) |
+| Caminhos de tamanho variável | CTE recursiva, cara e limitada | Nativo (`shortestPath`, `*1..n`) |
 | Integridade | FK, `CHECK`, tipos | Unicidade e existência; sem `CHECK` |
 | Transações | ACID | ACID |
 | Caso de uso no MovieLens | Catálogo, relatórios, BI | Recomendação, similaridade, exploração da rede |
