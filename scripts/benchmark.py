@@ -224,7 +224,7 @@ def main():
     if writes:
         lines += [
             "",
-            f"## Escrita: {args.ingest:,} avaliações novas, gravadas uma a uma".replace(",", "."),
+            f"## Escrita: {args.ingest:,}".replace(",", ".") + " avaliações novas, gravadas uma a uma",
             "",
             "| Processos × escritas simultâneas | PostgreSQL (avaliações/s) | Cassandra (avaliações/s) | Mais rápido |",
             "| ---: | ---: | ---: | :---: |",

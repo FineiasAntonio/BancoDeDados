@@ -284,4 +284,108 @@ WHERE movie_id = 1
 
 ---
 
-RESULTADOS_AQUI
+## 5. Resultados do Benchmark
+
+Medidos com [`scripts/benchmark.py`](../scripts/benchmark.py) na **base completa** (20.000.263 avaliações), PostgreSQL 16 e Cassandra 5.0 num único servidor (4 núcleos, 15 GB de RAM). Todos os resultados foram conferidos: as seis consultas devolvem exatamente os mesmos dados nos dois bancos. Tabela completa em [`resultados_benchmark.md`](resultados_benchmark.md).
+
+### 5.1. Carga
+
+| | PostgreSQL | Cassandra |
+| :--- | ---: | ---: |
+| Tempo de carga (20 milhões de avaliações) | 7 min | 17 min |
+| Linhas de avaliação gravadas | 20 milhões | 40 milhões (2 tabelas) |
+
+A carga do PostgreSQL usa `COPY`, a importação em massa nativa. A do Cassandra usa o driver Python com lotes por partição; o equivalente ao `COPY` seria uma ferramenta de carga em massa (DSBulk ou geração direta de SSTables), não testada.
+
+### 5.2. Leitura (tempo médio de 10 execuções)
+
+| Consulta | PostgreSQL | Cassandra |
+| :--- | ---: | ---: |
+| 1 · Ficha do filme | 52,7 ms | 2,2 ms |
+| 2 · Top 10 | 2.737,5 ms | 1,5 ms |
+| 3 · Por gênero | 50.978,4 ms | 1,1 ms |
+| 4 · Busca por tags | 4,5 ms | 2,1 ms |
+| 5 · Histórico do usuário | 0,1 ms | 1,0 ms |
+| 6 · Período de um filme | 0,5 ms | 1,6 ms |
+
+* **Consultas 1 a 3**: a vantagem do Cassandra vem do **pré-cálculo** feito na carga (contadores, ranking e agregados por gênero). O PostgreSQL calcula tudo na hora sobre 20 milhões de linhas. É uma comparação entre "calcular" e "ler pronto": o PostgreSQL com uma *materialized view* também responderia em milissegundos, com o mesmo problema de manter os valores atualizados.
+* **Consulta 4**: os dois em poucos milissegundos; o Cassandra lê duas partições, o PostgreSQL faz duas junções indexadas e um agrupamento.
+* **Consultas 5 e 6**: com os índices compostos certos, o PostgreSQL é **mais rápido**. Os dois leem os dados já na ordem do índice ou da partição; a diferença de ~1 ms é o custo fixo de cada requisição no Cassandra (protocolo e driver).
+
+### 5.3. Escrita (100 mil avaliações novas, gravadas uma a uma, 2 processos × 16 simultâneas)
+
+| | PostgreSQL | Cassandra |
+| :--- | ---: | ---: |
+| Avaliações por segundo | **14.600** | 3.142 |
+| Escritas por avaliação | 1 `INSERT` | 2 `INSERT` + 1 contador |
+
+* **Neste ambiente, o PostgreSQL gravou ~4,6 vezes mais rápido.** Por operação individual, a diferença cai para ~1,5 vez (3.142 × 3 = ~9.400 operações por segundo no Cassandra).
+* **Por que o Cassandra não venceu**:
+  1. **Desnormalização**: cada avaliação custa três escritas, uma delas num contador, que é a operação mais cara do Cassandra (lê o valor atual antes de gravar).
+  2. **Cliente**: um processo Python com o driver do Cassandra satura em ~6 mil operações por segundo; com 4 núcleos compartilhados entre clientes e servidor, não houve como gerar mais carga.
+  3. **Um único nó**: a vantagem de escrita do Cassandra é **escalar horizontalmente** — acrescentar nós aumenta a capacidade quase linearmente, sem nó mestre. Num servidor só, essa vantagem não existe.
+* Antes de chegar a esse método, a primeira tentativa foi descartada: com um único processo cliente, o Cassandra ficou em ~1.700 avaliações por segundo, limitado pelo Python e não pelo banco.
+
+---
+
+## 6. Análise Comparativa Detalhada
+
+### 6.1. Esquema, Flexibilidade e Integridade
+
+| Critério | Relacional (PostgreSQL) | Cassandra |
+| :--- | :--- | :--- |
+| **Ponto de partida** | As entidades e suas dependências funcionais. | A lista de consultas. |
+| **Redundância** | Nenhuma (3FN). | Deliberada: a mesma avaliação em duas tabelas, títulos repetidos. |
+| **Consulta nova** | Normalmente só um `SELECT` novo (talvez um índice). | Normalmente uma **tabela nova** e uma recarga dos dados. |
+| **Integridade referencial** | Garantida pelo banco (`FOREIGN KEY`, `CHECK`). | Inexistente: fica com a aplicação. |
+| **Junções e agregações** | Livres. | Sem `JOIN`; `GROUP BY`/`ORDER BY` só dentro da partição. |
+| **Consistência entre cópias** | Não se aplica (uma cópia). | Responsabilidade da aplicação: se uma das duas escritas falhar, as tabelas divergem. |
+
+### 6.2. Transações e Consistência
+
+* **PostgreSQL**: ACID. Registrar uma avaliação e atualizar qualquer agregado acontece numa transação: ou tudo, ou nada.
+* **Cassandra**: atomicidade e isolamento apenas **dentro de uma partição**. Gravar a avaliação em `ratings_by_user` e em `ratings_by_movie` são escritas em partições diferentes; um `BATCH LOGGED` garante que as duas acabam acontecendo, mas sem isolamento (um leitor pode ver uma e não a outra por alguns instantes). Contadores não entram em lotes com outras tabelas e **não são idempotentes**: se uma atualização for repetida após um timeout, a contagem fica errada.
+* **Consistência ajustável**: cada operação escolhe quantas réplicas precisam confirmar (`ONE`, `QUORUM`, `ALL`). Com 3 réplicas, gravar e ler com `QUORUM` (2 + 2 > 3) garante ler o dado mais recente; ler com `ONE` é mais rápido, mas pode devolver um valor antigo. Neste projeto, com um único nó, todos os níveis se comportam igual — a demonstração exigiria um cluster de 3 nós.
+* **Teorema CAP**: o Cassandra prioriza **disponibilidade e tolerância a partição (AP)**, com consistência ajustável por operação. O PostgreSQL, com um servidor principal, prioriza consistência.
+
+### 6.3. Desempenho e Escala
+
+1. **Leitura por chave**: os dois bancos respondem em milissegundos quando a consulta encontra um índice (PostgreSQL) ou uma partição (Cassandra). No PostgreSQL, com o índice certo, as consultas 5 e 6 chegam a ser mais rápidas.
+2. **Agregações**: o PostgreSQL calcula na hora, o que leva segundos sobre 20 milhões de linhas. O Cassandra **não calcula**: lê o resultado pronto. O tempo baixo das consultas 2 e 3 no Cassandra vem do **pré-cálculo**, não do banco. Uma *materialized view* no PostgreSQL faria o mesmo, com o mesmo custo de manutenção.
+3. **Escrita**: o caminho de escrita do Cassandra (log de commit + memória, sem leitura antes de gravar, sem verificação de chaves estrangeiras) é barato **por nó**, e a capacidade total cresce acrescentando nós. Neste projeto, com **um nó e quatro núcleos**, isso não aparece: cada avaliação são 3 escritas no Cassandra contra 1 no PostgreSQL, e o cliente Python precisa de mais processamento para cada requisição.
+4. **Escalabilidade**: o Cassandra distribui as partições entre os nós por hash da chave, sem nó mestre; dobrar o número de nós dobra, aproximadamente, a capacidade de leitura e escrita. O PostgreSQL escala principalmente verticalmente, com réplicas de leitura; dividir a escrita entre servidores exige soluções externas (por exemplo, Citus).
+
+---
+
+## 7. Matriz Síntese de Decisão
+
+| Dimensão | Relacional (PostgreSQL) | Cassandra |
+| :--- | :--- | :--- |
+| Modelagem | Por entidades (normalização) | Por consultas (desnormalização) |
+| Linguagem | SQL completo | CQL: parece SQL, sem JOIN e com filtros só pela chave |
+| Perguntas novas | Fáceis | Exigem nova tabela e recarga |
+| Agregações sobre a base | **Fortes** | Inexistentes (pré-calculadas) |
+| Leitura por chave | Rápida com índice | Rápida por desenho |
+| Escrita num nó | Mais rápida neste teste | Mais lenta neste teste (3 escritas por avaliação) |
+| Escrita em escala | Limitada ao servidor principal | **Cresce com o número de nós** |
+| Integridade | FK, `CHECK`, tipos | Só tipos |
+| Consistência | ACID | Ajustável por operação (AP) |
+| Caso de uso no MovieLens | Catálogo, relatórios, BI | Fluxo de avaliações, históricos por usuário e por filme |
+
+---
+
+## 8. Conclusão e Recomendações
+
+1. **Quando adotar o modelo relacional (PostgreSQL)**:
+   * Quando as perguntas mudam e não são conhecidas de antemão (BI, relatórios, análises).
+   * Quando há agregações sobre grandes volumes.
+   * Quando a integridade (chaves estrangeiras, domínios) e as transações são obrigatórias.
+
+2. **Quando adotar o Cassandra**:
+   * Quando o volume de escrita é grande e contínuo (eventos, avaliações, sensores, logs) e precisa crescer além de um servidor.
+   * Quando as consultas são conhecidas e sempre por uma chave (o histórico de um usuário, as avaliações de um filme num período).
+   * Quando disponibilidade importa mais do que consistência imediata (um nó caído não pode derrubar o serviço).
+
+3. **Arquitetura recomendada (persistência poliglota)**: numa plataforma real inspirada no MovieLens:
+   * **PostgreSQL** como fonte da verdade do catálogo, dos usuários e dos relatórios.
+   * **Cassandra** recebendo o fluxo de avaliações e servindo as telas por chave (histórico, avaliações recentes), com os agregados recalculados periodicamente a partir dele.
