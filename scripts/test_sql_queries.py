@@ -3,7 +3,7 @@
 scripts/test_sql_queries.py
 --------------------------------------------------------------------------------
 Executa no PostgreSQL as consultas de relational/queries.sql e exibe os
-resultados no terminal, para comparação com o Neo4j (test_graph_queries.py).
+resultados no terminal, para comparação com o Cassandra (test_cassandra_queries.py).
 --------------------------------------------------------------------------------
 """
 

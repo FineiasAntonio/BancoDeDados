@@ -87,8 +87,9 @@ CREATE TABLE IF NOT EXISTS ratings (
 -- ÍNDICES B-TREE ESPECÍFICOS PARA OTIMIZAÇÃO DE CONSULTAS (POSTGRESQL)
 -- -----------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_movies_release_year ON movies (release_year);
-CREATE INDEX IF NOT EXISTS idx_ratings_movie_id ON ratings (movie_id);
-CREATE INDEX IF NOT EXISTS idx_ratings_user_id ON ratings (user_id);
+-- (movie_id, rated_at) e (user_id, rated_at): buscas por filme/usuário já ordenadas por data
+CREATE INDEX IF NOT EXISTS idx_ratings_movie_rated ON ratings (movie_id, rated_at);
+CREATE INDEX IF NOT EXISTS idx_ratings_user_rated ON ratings (user_id, rated_at);
 CREATE INDEX IF NOT EXISTS idx_user_movie_tags_movie_id ON user_movie_tags (movie_id);
 CREATE INDEX IF NOT EXISTS idx_user_movie_tags_tag_id ON user_movie_tags (tag_id);
 

@@ -1,8 +1,8 @@
-# Projeto de Banco de Dados: Análise Comparativa Relacional vs. Grafo
+# Projeto de Banco de Dados: Análise Comparativa Relacional vs. Cassandra
 
-Este repositório contém a implementação, os scripts de ETL, as modelagens e a análise comparativa entre um **SGBD Relacional (PostgreSQL normalizado até a 3FN)** e um **SGBD NoSQL orientado a Grafos (Neo4j)**, usando a base pública **MovieLens 20M**.
+Este repositório contém a implementação, os scripts de ETL, as modelagens e a análise comparativa entre um **SGBD Relacional (PostgreSQL normalizado até a 3FN)** e um **SGBD NoSQL orientado a colunas largas (Apache Cassandra)**, usando a base pública **MovieLens 20M**.
 
-O MovieLens é, essencialmente, uma rede: usuários ligados a filmes pelas avaliações, filmes ligados a gêneros e tags. O trabalho compara os dois modelos em consultas típicas de catálogo e em consultas de recomendação, com tempos medidos.
+A comparação contrapõe duas formas de modelar: **por entidades** (relacional: tabelas normalizadas, e as consultas se adaptam ao modelo) e **por consultas** (Cassandra: uma tabela para cada pergunta, com os dados duplicados e já ordenados para responder lendo uma única partição). Os tempos de leitura e de escrita são medidos nos dois bancos.
 
 ---
 
@@ -14,25 +14,24 @@ BancoDeDados/
 ├── relational/
 │   ├── postgres_ddl.sql            # DDL do PostgreSQL (3FN, constraints e índices)
 │   ├── clean.sql                   # Remove todas as tabelas (para recriar o esquema do zero)
-│   └── queries.sql                 # As 7 consultas de comparação em SQL
-├── neo4j/
-│   ├── schema.cypher               # Constraints de unicidade e índices do grafo
-│   └── queries.cypher              # As 7 consultas equivalentes em Cypher
+│   └── queries.sql                 # As 6 consultas de comparação em SQL
+├── cassandra/
+│   ├── schema.cql                  # Keyspace e tabelas, uma por consulta
+│   └── queries.cql                 # As 6 consultas equivalentes em CQL
 ├── scripts/
 │   ├── download_data.py            # Baixa e extrai o MovieLens 20M
 │   ├── load_relational.py          # ETL: CSVs -> PostgreSQL normalizado (COPY)
-│   ├── load_neo4j.py               # ETL: CSVs -> grafo no Neo4j (UNWIND em lotes)
+│   ├── load_cassandra.py           # ETL: CSVs -> Cassandra (lotes por partição + agregados pré-calculados)
 │   ├── test_sql_queries.py         # Executa e exibe as consultas SQL
-│   ├── test_graph_queries.py       # Executa e exibe as consultas Cypher
-│   ├── benchmark.py                # Mede o tempo das consultas nos dois bancos
-│   ├── build_similarity.py         # Pré-calcula a similaridade entre filmes como aresta SIMILAR
+│   ├── test_cassandra_queries.py   # Executa e exibe as consultas CQL (e a que o Cassandra recusa)
+│   ├── benchmark.py                # Mede leitura (6 consultas) e escrita (avaliações/s) nos dois bancos
 │   └── common.py                   # Conexões e funções compartilhadas
 ├── docs/
 │   ├── analise.md                  # Relatório técnico completo
 │   ├── resultados_benchmark.md     # Gerado por scripts/benchmark.py
-│   ├── der.drawio                  # Diagrama entidade-relacionamento
-│   └── modelo_logico.puml          # Modelo lógico relacional (PlantUML)
-├── docker-compose.yml              # PostgreSQL 16 e Neo4j 5.26
+│   ├── modelo_logico.puml / .png   # Modelo lógico relacional (PlantUML)
+│   └── apresentacao.pptx           # Slides
+├── docker-compose.yml              # PostgreSQL 16 e Cassandra 5.0
 ├── requirements.txt
 └── executar_tudo.sh / .bat         # Executa tudo de uma vez (Linux/macOS e Windows)
 ```
@@ -43,7 +42,7 @@ BancoDeDados/
 
 ### Pré-requisitos
 
-* **Docker** e **Docker Compose**.
+* **Docker** e **Docker Compose** (o Cassandra precisa de ~2 GB de RAM).
 * **Python 3.10+**:
   ```bash
   pip install -r requirements.txt
@@ -56,69 +55,60 @@ BancoDeDados/
 executar_tudo.bat         # Windows
 ```
 
-O script sobe os containers, baixa os dados, carrega os dois bancos, executa as consultas e roda o benchmark.
-
 ### Execução passo a passo
 
 ```bash
-docker compose up -d                 # PostgreSQL (5432) e Neo4j (7474 / 7687)
+docker compose up -d                 # PostgreSQL (5432) e Cassandra (9042); o Cassandra leva ~1 min para subir
 python scripts/download_data.py      # dados em data/raw/
 
 # Relacional
 python scripts/load_relational.py --sample-ratings 100000
 python scripts/test_sql_queries.py
 
-# Grafo
-python scripts/load_neo4j.py --sample-ratings 100000
-python scripts/test_graph_queries.py
-python scripts/build_similarity.py   # opcional: pré-calcula as arestas (:Movie)-[:SIMILAR]->(:Movie)
+# Cassandra
+python scripts/load_cassandra.py --sample-ratings 100000
+python scripts/test_cassandra_queries.py
 
-# Tempos (gera docs/resultados_benchmark.md)
+# Leitura e escrita (gera docs/resultados_benchmark.md)
 python scripts/benchmark.py
 ```
 
-Para carregar os 20 milhões de avaliações, use `--all-ratings` nos dois scripts de carga. No Neo4j a carga completa via Cypher é demorada; a amostra de 100 mil é suficiente para a comparação.
+Para carregar os 20 milhões de avaliações, use `--all-ratings` nos dois scripts de carga.
 
 As consultas também podem ser executadas direto nos clientes de cada banco:
 
 ```bash
 psql -h localhost -U postgres -d movielens -f relational/queries.sql
-cypher-shell -a bolt://localhost:7687 -u neo4j -p neo4jpassword -f neo4j/queries.cypher
-```
-
-O **Neo4j Browser** (http://localhost:7474, usuário `neo4j`, senha `neo4jpassword`) mostra os resultados como grafo, o que é ótimo para a apresentação. Experimente:
-
-```cypher
-MATCH p = (:Movie {movie_id: 1})-[:HAS_TAG]->(:Tag)<-[:HAS_TAG]-(:Movie) RETURN p LIMIT 30
+docker exec -i movielens_cassandra cqlsh < cassandra/queries.cql
 ```
 
 ---
 
-## 🔎 As 7 consultas comparadas
+## 🔎 As consultas comparadas
 
-| # | Consulta | Favorece |
+| # | Consulta | No Cassandra |
 | :--- | :--- | :--- |
-| 1 | Ficha completa de um filme | — (busca pontual) |
-| 2 | Top 10 filmes (mínimo de 50 votos) | Relacional (agregação global) |
-| 3 | Filmes e média por gênero | Relacional (agregação global) |
-| 4 | Filmes com as tags `pixar` / `animation` | — |
-| 5 | "Quem gostou deste também gostou de..." (2 saltos) | Grafo (legibilidade) |
-| 6 | Filmes com mais tags em comum | Grafo (vizinhança) |
-| 7 | Recomendações personalizadas para um usuário (3 saltos) | Grafo (legibilidade) |
+| 1 | Ficha completa de um filme | 2 leituras por chave (filme + contadores) |
+| 2 | Top 10 filmes (mínimo de 50 votos) | **Recusada** na forma natural; ranking pré-calculado na carga |
+| 3 | Filmes e média por gênero | Pré-calculada na carga |
+| 4 | Filmes com as tags `pixar` / `animation` | Tabela própria, tag como chave de partição |
+| 5 | Histórico recente de um usuário | Uma partição, já ordenada por data |
+| 6 | Avaliações de um filme num período | Faixa dentro de uma partição |
+| — | Gravação de avaliações (avaliações/s) | Ponto forte do Cassandra |
 
 ---
 
 ## 📊 Síntese
 
-| Dimensão | Relacional (PostgreSQL / 3FN) | Grafo (Neo4j) |
+| Dimensão | Relacional (PostgreSQL / 3FN) | Cassandra |
 | :--- | :--- | :--- |
-| **Organização** | 8 tabelas normalizadas | 4 tipos de nó e 3 tipos de aresta |
-| **Gêneros** | Tabela associativa $N:M$ (`movie_genres`) | Aresta `IN_GENRE` para nós `:Genre` |
-| **Links externos** | Tabela 1:1 (`movie_links`) | Propriedades do nó `:Movie` |
-| **Avaliações** | Tabela com PK composta | Aresta `RATED {rating, rated_at}` |
-| **Tags** | Catálogo `tags` + `user_movie_tags` | Aresta `HAS_TAG {count}` para nós `:Tag` |
-| **Relacionamentos** | Calculados na consulta (`JOIN`) | Armazenados como ponteiros |
-| **Integridade** | FK, `CHECK`, tipos | Unicidade; arestas nunca órfãs |
-| **Transações** | ACID | ACID |
+| **Modelagem** | Por entidades, sem redundância | Por consultas, uma tabela por pergunta |
+| **Organização** | 8 tabelas normalizadas | 7 tabelas desnormalizadas |
+| **Uma avaliação** | 1 linha em `ratings` | 2 linhas (`ratings_by_user`, `ratings_by_movie`) + contador |
+| **Junções** | `JOIN` em qualquer combinação | Não existem |
+| **Agregações** | `GROUP BY`, `ORDER BY` livres | Limitadas à partição; o resto é pré-calculado |
+| **Integridade** | FK, `CHECK`, tipos | Só tipos; sem chaves estrangeiras |
+| **Consistência** | ACID | Ajustável por consulta (`ONE`, `QUORUM`, `ALL`) |
+| **Escala** | Vertical (principalmente) | Horizontal, sem nó mestre |
 
 📄 Relatório completo: **[docs/analise.md](docs/analise.md)**

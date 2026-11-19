@@ -1,20 +1,18 @@
-# Análise Comparativa: Banco de Dados Relacional (PostgreSQL) vs. Banco de Dados em Grafo (Neo4j)
+# Análise Comparativa: Banco de Dados Relacional (PostgreSQL) vs. Colunas Largas (Apache Cassandra)
 
 **Dataset analisado:** MovieLens 20M (GroupLens Research)  
-**Contexto:** estudo comparativo entre os paradigmas **Relacional (3FN)** e **NoSQL orientado a Grafos (Property Graph)**.
+**Contexto:** estudo comparativo entre os paradigmas **Relacional (3FN)** e **NoSQL de colunas largas (wide-column)**.
 
 ---
 
 ## 1. Introdução e Contextualização do Problema
 
-O objetivo deste estudo é modelar, implementar e confrontar duas abordagens de gerenciamento de dados sobre a mesma base pública: o dataset **MovieLens 20M**.
+O objetivo deste estudo é modelar, implementar e confrontar duas abordagens de gerenciamento de dados sobre a mesma base pública: o dataset **MovieLens 20M**, com cadastro de filmes (`movie.csv`), links externos (`link.csv`), tags atribuídas por usuários (`tag.csv`) e **mais de 20 milhões de avaliações** (`rating.csv`).
 
-O dataset é composto por atributos cadastrais de filmes (`movie.csv`), links para catálogos externos (`link.csv`), termos atribuídos livremente por usuários (`tag.csv`) e mais de **20 milhões de avaliações** numéricas (`rating.csv`).
+As 20 milhões de avaliações são o centro da escolha do Cassandra como contraponto: é um volume grande, que só cresce (cada nota é uma inserção), e que é quase sempre lido por uma chave conhecida — "as avaliações deste usuário", "as avaliações deste filme". É exatamente o tipo de carga para o qual o Cassandra foi projetado.
 
-Escolhemos um banco em **grafo** como contraponto ao relacional porque o MovieLens é, na sua essência, uma **rede**: usuários ligados a filmes pelas avaliações, filmes ligados a gêneros e a tags. A pergunta mais valiosa que se faz a esse tipo de dado — *"que filme recomendar a esta pessoa?"* — é uma pergunta sobre **caminhos** nessa rede.
-
-1. **Paradigma Relacional**: dados em tabelas, **sem redundância** pelas regras de normalização (1FN, 2FN e 3FN), com integridade garantida por chaves primárias e estrangeiras e transações **ACID**. Relacionamentos são *calculados* no momento da consulta, via `JOIN`.
-2. **Paradigma em Grafo**: dados como **nós** (entidades) e **arestas** (relacionamentos), ambos com propriedades. Relacionamentos são *armazenados* fisicamente: cada nó guarda ponteiros diretos para seus vizinhos (*index-free adjacency*), de modo que percorrer uma aresta custa o mesmo independentemente do tamanho total da base.
+1. **Paradigma Relacional**: modelagem **por entidades**. Os dados são normalizados (1FN a 3FN), sem redundância, com integridade garantida por chaves e transações ACID. Qualquer pergunta é respondida combinando tabelas com `JOIN`, `GROUP BY` e `ORDER BY`.
+2. **Paradigma de colunas largas (Cassandra)**: modelagem **por consultas**. Parte-se da lista de perguntas e cria-se **uma tabela para cada uma**, com os dados duplicados e já ordenados no disco de forma que cada resposta seja a leitura de uma única partição. Não há `JOIN`, e agregações só funcionam dentro de uma partição. Em troca, o banco escala horizontalmente, sem nó mestre, e aceita escritas em altíssimo volume.
 
 ---
 
@@ -89,43 +87,62 @@ erDiagram
 
 * **Resultado relacional**: **8 tabelas**.
 
+Para as consultas por usuário e por filme ordenadas por data (consultas 5 e 6), a tabela `ratings` tem os índices `(user_id, rated_at)` e `(movie_id, rated_at)`. Assim o PostgreSQL também responde a essas perguntas lendo o índice já na ordem certa — uma comparação justa com as tabelas do Cassandra, que são desenhadas para elas.
+
 ---
 
-### 2.2. Abordagem em Grafo (Neo4j)
+### 2.2. Abordagem em Colunas Largas (Cassandra)
 
-No grafo, a pergunta de modelagem muda de *"quais são as dependências funcionais?"* para *"quais são as coisas e como elas se ligam?"*. Cada tabela associativa do modelo relacional deixa de existir e vira **aresta**.
+No Cassandra, cada tabela tem uma **chave de partição** (define em qual nó e em qual bloco do disco a linha mora) e **colunas de ordenação** (*clustering columns*, que definem a ordem das linhas dentro da partição). Uma consulta eficiente lê **uma** partição, de preferência uma faixa contínua dela.
 
-```mermaid
-graph LR
-    U((User)) -- "RATED<br/>{rating, rated_at}" --> M((Movie))
-    M -- IN_GENRE --> G((Genre))
-    M -- "HAS_TAG<br/>{count}" --> T((Tag))
-```
-
-| Elemento | Tipo | Propriedades | Origem relacional |
+| Tabela | Chave de partição | Ordenação | Responde à |
 | :--- | :--- | :--- | :--- |
-| `(:User)` | nó | `user_id` | `users` |
-| `(:Movie)` | nó | `movie_id`, `title`, `release_year`, `imdb_id`, `tmdb_id` | `movies` + `movie_links` |
-| `(:Genre)` | nó | `name` | `genres` |
-| `(:Tag)` | nó | `name` | `tags` |
-| `[:RATED]` | aresta User → Movie | `rating`, `rated_at` | `ratings` |
-| `[:IN_GENRE]` | aresta Movie → Genre | — | `movie_genres` |
-| `[:HAS_TAG]` | aresta Movie → Tag | `count` (quantos usuários aplicaram a tag) | `user_movie_tags` agregado |
+| `movies` | `movie_id` | — | Consulta 1: ficha do filme (gêneros e tags como `set<text>` na própria linha) |
+| `movie_stats` | `movie_id` | — | Consulta 1: total e soma das notas (contadores) |
+| `top_movies` | `bucket` | `avg_rating DESC, vote_count DESC, movie_id` | Consulta 2: ranking pré-calculado |
+| `genre_stats` | `genre` | — | Consulta 3: agregados por gênero pré-calculados |
+| `movies_by_tag` | `tag` | `movie_id` | Consulta 4: filmes de uma tag |
+| `ratings_by_user` | `user_id` | `rated_at DESC, movie_id` | Consulta 5: histórico do usuário |
+| `ratings_by_movie` | `movie_id` | `rated_at DESC, user_id` | Consulta 6: avaliações do filme por período |
+
+```sql
+CREATE TABLE movielens.ratings_by_user (
+    user_id  int,
+    rated_at timestamp,
+    movie_id int,
+    rating   float,
+    PRIMARY KEY ((user_id), rated_at, movie_id)
+) WITH CLUSTERING ORDER BY (rated_at DESC, movie_id ASC);
+```
 
 Decisões de modelagem:
 
-* **Tabelas associativas viram arestas**: `ratings` e `movie_genres` não são entidades, são relações. No grafo, a nota e a data passam a ser **propriedades da aresta** `RATED`.
-* **Links externos como propriedades do filme**: uma relação 1:1 não justifica um nó próprio; `imdb_id` e `tmdb_id` ficam no nó `:Movie`.
-* **Tags agregadas por filme**: a etiquetagem original é uma relação **ternária** (usuário, filme, tag), e arestas no modelo de grafo de propriedades ligam só **dois** nós. Representá-la fielmente exigiria *reificar* a relação num nó intermediário `(:Tagging)`. Como todas as consultas usam as tags para descrever filmes, optamos por uma aresta `HAS_TAG` por par (filme, tag), com a propriedade `count`. **Perde-se** a informação de quem aplicou a tag e quando — uma limitação consciente, registrada aqui.
-* **Integridade mínima**: o Neo4j não tem esquema obrigatório nem chaves estrangeiras. As únicas garantias impostas pelo banco são as *constraints* de unicidade em `user_id`, `movie_id`, `Genre.name` e `Tag.name` (ver [`neo4j/schema.cypher`](../neo4j/schema.cypher)). Em compensação, uma aresta **não pode** apontar para um nó inexistente: não existem "referências órfãs" no grafo.
+* **Desnormalização deliberada**: cada avaliação é gravada **duas vezes** (`ratings_by_user` e `ratings_by_movie`) e ainda soma nos contadores de `movie_stats`. O título do filme é repetido em `movies_by_tag` e `top_movies`. No relacional isso seria uma anomalia; no Cassandra é o modelo.
+* **O que o banco não sabe agregar é calculado na carga**: o top 10 e as médias por gênero exigiriam `GROUP BY` sobre toda a base com `ORDER BY` pelo resultado, o que o Cassandra não permite. O script de carga calcula esses números e grava em `top_movies` e `genre_stats`. O custo: esses valores ficam desatualizados até a próxima recarga (ou exigem um processo à parte para mantê-los).
+* **Contadores em meias estrelas**: colunas `counter` só aceitam inteiros. A soma das notas é guardada como `nota × 2` (`half_stars_sum`), e a média é calculada na aplicação.
+* **Gêneros e tags como coleções** (`set<text>`) dentro da linha do filme, no lugar das tabelas associativas `movie_genres` e `user_movie_tags`.
+* **Sem integridade referencial**: nada impede uma avaliação de um filme que não existe. Essa garantia passa para a aplicação.
+* **Um único nó** (fator de replicação 1). Em produção, o padrão seria `NetworkTopologyStrategy` com 3 réplicas por data center.
 
-* **Resultado em grafo**: **4 rótulos de nó** e **3 tipos de aresta**.
+* **Resultado Cassandra**: **7 tabelas**, cada uma servindo uma consulta.
 
 ---
 
-## 3. Confronto Direto de Consultas (SQL vs. Cypher)
+## 3. Processo de ETL
 
-As sete consultas abaixo estão em [`relational/queries.sql`](../relational/queries.sql) e [`neo4j/queries.cypher`](../neo4j/queries.cypher), e devolvem **os mesmos resultados** nos dois bancos (verificado pelos scripts `test_sql_queries.py` e `test_graph_queries.py`). Elas foram escolhidas para cobrir os dois lados: consultas em que o relacional é naturalmente forte (agregações sobre a base inteira) e consultas em que o grafo é naturalmente forte (navegar relacionamentos).
+1. **Extração** (`download_data.py`): baixa o `ml-20m.zip` e extrai os quatro CSVs.
+2. **Transformação** (pandas, as mesmas regras para os dois bancos): título e ano separados, gêneros explodidos, tags normalizadas (sem espaços nas pontas, minúsculas), timestamp Unix convertido para data e hora, IMDb com zeros à esquerda.
+3. **Carga**:
+   * **PostgreSQL** (`load_relational.py`): `COPY` em lotes de 500 mil linhas, na ordem que respeita as chaves estrangeiras.
+   * **Cassandra** (`load_cassandra.py`): escritas assíncronas e em paralelo pelo driver, agrupadas em lotes `UNLOGGED BATCH` **da mesma partição** (até 100 linhas). Lotes de uma partição só vão para um nó e são gravados de uma vez; lotes que misturam partições são um antipadrão no Cassandra. Ao final, a carga grava os contadores, o top 10 e os agregados por gênero.
+
+Agrupar por partição deixou a carga **8 vezes mais rápida** do que gravar linha a linha (de ~2.200 para ~17.500 avaliações por segundo).
+
+---
+
+## 4. Confronto Direto de Consultas (SQL vs. CQL)
+
+As consultas estão em [`relational/queries.sql`](../relational/queries.sql) e [`cassandra/queries.cql`](../cassandra/queries.cql).
 
 ### Consulta 1: Ficha completa de um filme
 
@@ -144,19 +161,16 @@ CROSS JOIN LATERAL (
 WHERE m.movie_id = 1;
 ```
 
-```cypher
-MATCH (m:Movie {movie_id: 1})
-OPTIONAL MATCH (m)-[:IN_GENRE]->(g:Genre)
-WITH m, g ORDER BY g.name
-WITH m, collect(g.name) AS genres
-OPTIONAL MATCH (:User)-[r:RATED]->(m)
-RETURN m.movie_id, m.title, m.release_year, m.imdb_id, m.tmdb_id, genres,
-       count(r) AS total_ratings, round(avg(r.rating), 2) AS avg_rating;
+```sql
+SELECT movie_id, title, release_year, imdb_id, tmdb_id, genres
+FROM movielens.movies WHERE movie_id = 1;
+SELECT half_stars_sum, rating_count
+FROM movielens.movie_stats WHERE movie_id = 1;
 ```
 
-* **Armadilha do SQL**: a versão ingênua (juntar `movie_genres` e `ratings` no mesmo `FROM`) multiplica cada avaliação pelo número de gêneros do filme e infla a contagem. Por isso as avaliações são agregadas numa subconsulta `LATERAL`. No Cypher o problema não aparece: os gêneros são coletados antes de expandir as avaliações.
+* No PostgreSQL, a média é calculada na hora, lendo as dezenas de milhares de avaliações de Toy Story. No Cassandra são **duas leituras por chave**; a média vem dos contadores, mantidos a cada escrita.
 
-### Consulta 2: Top 10 filmes mais bem avaliados (mínimo de 50 votos)
+### Consulta 2: Top 10 filmes (mínimo de 50 votos)
 
 ```sql
 SELECT m.movie_id, m.title, m.release_year,
@@ -169,16 +183,23 @@ ORDER BY AVG(r.rating) DESC, vote_count DESC, m.movie_id
 LIMIT 10;
 ```
 
-```cypher
-MATCH (:User)-[r:RATED]->(m:Movie)
-WITH m, count(r) AS vote_count, avg(r.rating) AS media
-WHERE vote_count >= 50
-RETURN m.movie_id, m.title, m.release_year, vote_count, round(media, 3) AS average_rating
-ORDER BY media DESC, vote_count DESC, m.movie_id
-LIMIT 10;
+A versão "natural" no Cassandra é **recusada**:
+
+```sql
+SELECT movie_id, avg(rating) AS media FROM movielens.ratings_by_movie
+GROUP BY movie_id ORDER BY media DESC LIMIT 10;
+-- InvalidRequest: ORDER BY só é permitido quando a chave de partição está restrita por = ou IN
 ```
 
-* **Terreno do relacional**: é uma agregação sobre **todas** as avaliações. O PostgreSQL lê a tabela `ratings` sequencialmente (dados contíguos, compactos) e agrupa com *hash aggregate*. O Neo4j precisa visitar cada aresta `RATED` individualmente.
+O que funciona é ler o ranking pré-calculado:
+
+```sql
+SELECT movie_id, title, release_year, vote_count, avg_rating
+FROM movielens.top_movies WHERE bucket = 'all' LIMIT 10;
+```
+
+* É a consulta que melhor mostra o limite do Cassandra: ele não faz análise livre sobre a base. Toda pergunta de BI precisa ser prevista e pré-calculada.
+* A partição única `bucket = 'all'` concentra a leitura num só nó (*hot partition*). Com milhares de linhas não é problema; em escala maior, o ranking seria dividido em vários buckets.
 
 ### Consulta 3: Filmes e média das avaliações por gênero
 
@@ -192,15 +213,12 @@ GROUP BY g.genre_id, g.name
 ORDER BY total_movies DESC, genre;
 ```
 
-```cypher
-MATCH (g:Genre)<-[:IN_GENRE]-(m:Movie)
-OPTIONAL MATCH (:User)-[r:RATED]->(m)
-WITH g, count(DISTINCT m) AS total_movies, count(r) AS total_ratings, avg(r.rating) AS media
-RETURN g.name AS genre, total_movies, total_ratings, round(media, 2) AS avg_genre_rating
-ORDER BY total_movies DESC, genre;
+```sql
+SELECT genre, total_movies, total_ratings, avg_rating
+FROM movielens.genre_stats;   -- a aplicação ordena por total_movies
 ```
 
-* A média é calculada sobre **todas as avaliações** dos filmes do gênero (filmes com mais votos pesam mais), igual nos dois bancos.
+* Mesma situação da Consulta 2: o Cassandra só lê o resultado pronto. A ordenação fica com a aplicação, porque a tabela tem uma partição por gênero e não há ordenação entre partições.
 
 ### Consulta 4: Filmes marcados com `pixar` ou `animation`
 
@@ -214,190 +232,50 @@ GROUP BY m.movie_id, m.title, m.release_year
 ORDER BY m.movie_id LIMIT 20;
 ```
 
-```cypher
-MATCH (m:Movie)-[:HAS_TAG]->(t:Tag)
-WHERE t.name IN ['pixar', 'animation']
-WITH m, t.name AS tag ORDER BY tag
-WITH m, collect(tag) AS matched_tags
-RETURN m.movie_id, m.title, m.release_year, matched_tags
-ORDER BY m.movie_id LIMIT 20;
+```sql
+SELECT tag, movie_id, title, release_year
+FROM movielens.movies_by_tag WHERE tag IN ('pixar', 'animation');
 ```
 
-* O Neo4j encontra os dois nós `:Tag` pelo índice de unicidade e então só segue as arestas que saem deles. O SQL faz o mesmo caminho lógico, mas via índices em `tags.tag_name` e `user_movie_tags.tag_id`.
+* O `IN` é permitido porque `tag` é a chave de partição: são lidas exatamente duas partições. O título está duplicado na tabela para evitar uma segunda leitura.
 
-### Consulta 5: "Quem gostou de Toy Story também gostou de..." (recomendação, 2 saltos)
+### Consulta 5: Histórico recente de um usuário
 
 ```sql
-SELECT m.movie_id, m.title, COUNT(*) AS score
-FROM ratings r1
-JOIN ratings r2 ON r2.user_id = r1.user_id AND r2.movie_id <> r1.movie_id
-JOIN movies m   ON m.movie_id = r2.movie_id
-WHERE r1.movie_id = 1 AND r1.rating >= 4 AND r2.rating >= 4
-GROUP BY m.movie_id, m.title
-ORDER BY score DESC, m.movie_id LIMIT 10;
+SELECT r.movie_id, r.rating, r.rated_at
+FROM ratings r
+WHERE r.user_id = 42
+ORDER BY r.rated_at DESC, r.movie_id
+LIMIT 20;
 ```
-
-```cypher
-MATCH (:Movie {movie_id: 1})<-[r1:RATED]-(u:User)-[r2:RATED]->(rec:Movie)
-WHERE r1.rating >= 4 AND r2.rating >= 4
-RETURN rec.movie_id, rec.title, count(u) AS score
-ORDER BY score DESC, rec.movie_id LIMIT 10;
-```
-
-* **Legibilidade**: o padrão Cypher é o desenho do próprio caminho *filme ← usuário → outro filme*. No SQL, a mesma ideia exige um *self-join* da tabela `ratings` com ela mesma, que é bem menos evidente para quem lê.
-* **Desempenho**: com 2 saltos e os índices certos (`ratings(movie_id)` e a PK que começa por `user_id`), o PostgreSQL resolve bem. A vantagem do grafo aqui é a legibilidade, não o tempo.
-
-### Consulta 6: Filmes com mais tags em comum com Toy Story
 
 ```sql
-WITH movie_tag AS (SELECT DISTINCT movie_id, tag_id FROM user_movie_tags)
-SELECT m.movie_id, m.title, COUNT(*) AS tags_em_comum,
-       string_agg(t.tag_name, ', ' ORDER BY t.tag_name) AS tags
-FROM movie_tag a
-JOIN movie_tag b ON b.tag_id = a.tag_id AND b.movie_id <> a.movie_id
-JOIN movies m    ON m.movie_id = b.movie_id
-JOIN tags t      ON t.tag_id = a.tag_id
-WHERE a.movie_id = 1
-GROUP BY m.movie_id, m.title
-ORDER BY tags_em_comum DESC, m.movie_id LIMIT 10;
+SELECT movie_id, rating, rated_at
+FROM movielens.ratings_by_user WHERE user_id = 42 LIMIT 20;
 ```
 
-```cypher
-MATCH (:Movie {movie_id: 1})-[:HAS_TAG]->(t:Tag)<-[:HAS_TAG]-(o:Movie)
-WITH o, t.name AS tag ORDER BY tag
-RETURN o.movie_id, o.title, count(*) AS tags_em_comum, collect(tag) AS tags
-ORDER BY tags_em_comum DESC, o.movie_id LIMIT 10;
-```
+* No Cassandra, as avaliações do usuário estão juntas no disco, já do mais recente para o mais antigo: a consulta lê as primeiras 20 linhas de uma partição e para.
 
-* Similaridade por vizinhança: dois filmes são parecidos se compartilham vizinhos (tags). No SQL é preciso primeiro **deduplicar** `user_movie_tags` (vários usuários aplicam a mesma tag ao mesmo filme); no grafo esse trabalho já foi feito na carga, com a aresta `HAS_TAG {count}`.
-
-### Consulta 7: Recomendações personalizadas para o usuário 42 (3 saltos)
-
-* **Objetivo**: a tela "recomendados para você". Primeiro encontra os 20 usuários mais parecidos com o usuário 42 (mais filmes bem avaliados em comum); depois sugere o que esses usuários avaliaram bem e o 42 ainda não viu.
+### Consulta 6: Avaliações de Toy Story em janeiro de 2015
 
 ```sql
-WITH vizinhos AS (
-    SELECT r2.user_id, COUNT(*) AS em_comum
-    FROM ratings r1
-    JOIN ratings r2 ON r2.movie_id = r1.movie_id AND r2.user_id <> r1.user_id
-    WHERE r1.user_id = 42 AND r1.rating >= 4 AND r2.rating >= 4
-    GROUP BY r2.user_id
-    ORDER BY em_comum DESC, r2.user_id
-    LIMIT 20
-)
-SELECT m.movie_id, m.title, COUNT(*) AS score
-FROM vizinhos v
-JOIN ratings r3 ON r3.user_id = v.user_id AND r3.rating >= 4
-JOIN movies m   ON m.movie_id = r3.movie_id
-WHERE NOT EXISTS (SELECT 1 FROM ratings ja_viu
-                  WHERE ja_viu.user_id = 42 AND ja_viu.movie_id = r3.movie_id)
-GROUP BY m.movie_id, m.title
-ORDER BY score DESC, m.movie_id
-LIMIT 10;
+SELECT r.user_id, r.rating, r.rated_at
+FROM ratings r
+WHERE r.movie_id = 1
+  AND r.rated_at >= '2015-01-01' AND r.rated_at < '2015-02-01'
+ORDER BY r.rated_at DESC, r.user_id;
 ```
 
-```cypher
-MATCH (u:User {user_id: 42})-[r1:RATED]->(:Movie)<-[r2:RATED]-(outro:User)
-WHERE r1.rating >= 4 AND r2.rating >= 4
-WITH u, outro, count(*) AS em_comum
-ORDER BY em_comum DESC, outro.user_id
-LIMIT 20
-MATCH (outro)-[r3:RATED]->(rec:Movie)
-WHERE r3.rating >= 4 AND NOT (u)-[:RATED]->(rec)
-RETURN rec.movie_id, rec.title, count(*) AS score
-ORDER BY score DESC, rec.movie_id
-LIMIT 10;
+```sql
+SELECT user_id, rating, rated_at
+FROM movielens.ratings_by_movie
+WHERE movie_id = 1
+  AND rated_at >= '2015-01-01 00:00:00+0000'
+  AND rated_at <  '2015-02-01 00:00:00+0000';
 ```
 
-* **Filtragem colaborativa** em 3 saltos: *usuário → filmes que ele gostou → outros usuários que gostaram dos mesmos filmes → filmes desses usuários*.
-* **Legibilidade**: no Cypher cada etapa é um padrão desenhado, e o "ainda não viu" é o padrão negativo `NOT (u)-[:RATED]->(rec)`. No SQL, a tabela `ratings` aparece **quatro vezes** (três junções e um `NOT EXISTS`), e é preciso saber que cada cópia representa um papel diferente (o usuário, os vizinhos, as sugestões, o "já viu").
-* **Desempenho**: na amostra de 100 mil avaliações, o PostgreSQL foi mais rápido. As junções são todas por índice (`ratings(user_id)` via PK e `ratings(movie_id)`) e os conjuntos intermediários são pequenos. O custo do SQL cresce com o tamanho da tabela `ratings` (cada junção é uma busca em índice B-Tree), enquanto o do grafo cresce com a vizinhança do usuário; por isso a diferença tende a diminuir com a base completa de 20 milhões, algo que não medimos.
+* Faixa contínua dentro da partição do filme. Filtrar por qualquer coluna que não seja da chave (por exemplo, `rating = 5`) seria recusado, a não ser com `ALLOW FILTERING`, que lê tudo e é desaconselhado.
 
 ---
 
-## 4. Resultados do Benchmark
-
-O script [`scripts/benchmark.py`](../scripts/benchmark.py) executa cada consulta nos dois bancos (1 execução de aquecimento + mediana de 5) e grava a tabela em [`resultados_benchmark.md`](resultados_benchmark.md).
-
-> **Preencher com os números da execução real** (`python scripts/benchmark.py`), indicando o volume de avaliações carregado (amostra de 100 mil ou base completa) e a máquina usada.
-
-No teste preliminar com **dados sintéticos** no formato do MovieLens (3 mil filmes, 100 mil avaliações; média de 20 execuções):
-
-| Consulta | PostgreSQL (ms) | Neo4j (ms) |
-| :--- | ---: | ---: |
-| 1 · Ficha do filme | 1,7 | 6,7 |
-| 2 · Top 10 | 56,5 | 90,5 |
-| 3 · Média por gênero | 213,4 | 232,4 |
-| 4 · Busca por tags | 1,6 | 6,5 |
-| 5 · Quem gostou também gostou | 19,9 | 39,5 |
-| 6 · Tags em comum | 13,3 | 16,6 |
-| 7 · Recomendação personalizada | 4,0 | 17,6 |
-
-* **O PostgreSQL foi mais rápido em todas as consultas** nessa escala. Buscas pontuais e agregações favorecem tabelas contíguas com índices B-Tree, e mesmo as consultas de recomendação (2 e 3 saltos) se resolvem com poucas junções indexadas sobre conjuntos pequenos.
-* **As consultas 3 e 6 ficaram próximas**: a diferença é da ordem da variação entre execuções.
-* **O Neo4j paga um custo fixo maior por consulta** (planejamento e protocolo Bolt) e varia mais entre execuções (JVM). Em consultas de 1 a 2 ms, esse custo fixo domina.
-
-A conclusão honesta é que, **nesta escala**, a vantagem do grafo não é o tempo de resposta, e sim a **modelagem e a legibilidade** das consultas sobre relações. A vantagem de desempenho do grafo aparece quando a travessia é longa ou de profundidade variável, ou quando a tabela de relações é grande o bastante para que cada junção pese — cenários que a amostra de 100 mil avaliações não cobre.
-
----
-
-## 5. Análise Comparativa Detalhada
-
-### 5.1. Esquema, Flexibilidade e Integridade
-
-| Critério | Relacional (PostgreSQL) | Grafo (Neo4j) |
-| :--- | :--- | :--- |
-| **Definição de esquema** | *Schema-on-write*: tabelas e tipos definidos antes da carga. | Sem esquema obrigatório; rótulos e propriedades livres. Constraints opcionais. |
-| **Evolução** | Exige `ALTER TABLE` / migrações. | Novos tipos de nó ou aresta podem ser criados a qualquer momento, sem afetar os existentes. |
-| **Integridade referencial** | Garantida pelo motor (`FOREIGN KEY`, `ON DELETE CASCADE`, `CHECK`). | Arestas sempre ligam nós existentes (não há "FK órfã"), mas não há `CHECK` de domínio (ex.: nota entre 0,5 e 5) nem tipos obrigatórios. |
-| **Relacionamentos** | Calculados no momento da consulta (`JOIN`). | Armazenados fisicamente (ponteiros entre nós). |
-| **Relações ternárias** | Naturais (tabela com 3 chaves estrangeiras). | Exigem reificação em um nó intermediário. |
-
-### 5.2. Transações e Consistência
-
-* **PostgreSQL**: ACID completo. Uma operação composta (cadastrar usuário, registrar nota, aplicar tag) é gravada inteira ou revertida (`ROLLBACK`).
-* **Neo4j**: também é **ACID** — diferente de muitos NoSQL, toda escrita ocorre em transação, com isolamento *read committed*.
-* **Teorema CAP**: um servidor Neo4j isolado (como neste projeto) não tem partição de rede a considerar. Em cluster, o Neo4j replica as escritas por consenso (Raft) entre os servidores primários, priorizando **consistência** — comportamento tipicamente **CP**. Réplicas secundárias de leitura recebem os dados de forma assíncrona e podem estar ligeiramente atrasadas. O PostgreSQL com replicação síncrona também se comporta como CP; com replicação assíncrona, as réplicas de leitura podem ficar defasadas.
-
-### 5.3. Desempenho e Armazenamento
-
-1. **Custo de percorrer relações**: no relacional, cada `JOIN` é uma busca num índice B-Tree — custo **O(log n)** que cresce com o tamanho da tabela. No grafo, seguir uma aresta é seguir um ponteiro — custo **constante**, independente do tamanho total da base (*index-free adjacency*). Com 1 ou 2 saltos a diferença é pequena; com caminhos longos ela se multiplica a cada salto.
-2. **Agregações globais**: o relacional vence. Tabelas são armazenadas de forma contígua e compacta (`NUMERIC(2,1)`, `INTEGER`), ideais para varredura sequencial. O grafo armazena registros de tamanho fixo ligados por ponteiros, menos eficientes para "ler tudo".
-3. **Armazenamento**: cada aresta no Neo4j guarda ponteiros para os dois nós e para as arestas vizinhas, o que tende a ocupar **mais espaço** que a linha equivalente numa tabela relacional.
-4. **Carga em massa**: o `COPY` do PostgreSQL é extremamente eficiente. No Neo4j, a carga via Cypher (`UNWIND` em lotes) é mais lenta; para a base completa, o caminho recomendado seria o `neo4j-admin database import`, que monta os arquivos do grafo offline.
-5. **Escalabilidade**: ambos escalam principalmente **verticalmente** para escrita. Grafos são difíceis de particionar (*sharding*) justamente porque cortar o grafo quebra os caminhos — uma limitação estrutural do modelo.
-
----
-
-## 6. Matriz Síntese de Decisão
-
-| Dimensão | Relacional (PostgreSQL) | Grafo (Neo4j) |
-| :--- | :--- | :--- |
-| Unidade de dado | Tabela / linha | Nó / aresta |
-| Normalização | Estrita até a 3FN | Não se aplica: relações são cidadãs de primeira classe |
-| Relacionamentos | `JOIN` calculado na consulta | Ponteiros armazenados |
-| Linguagem | SQL (declarativa, padrão ISO) | Cypher (declarativa, baseada em padrões; base do padrão ISO GQL) |
-| Agregações sobre a base inteira | **Forte** | Mais lento |
-| Consultas sobre relações | Várias cópias da mesma tabela unidas por JOIN | Padrões que desenham o caminho (`(u)-[:RATED]->(m)`) |
-| Caminhos de tamanho variável | CTE recursiva, cara e limitada | Nativo (`shortestPath`, `*1..n`) |
-| Integridade | FK, `CHECK`, tipos | Unicidade e existência; sem `CHECK` |
-| Transações | ACID | ACID |
-| Caso de uso no MovieLens | Catálogo, relatórios, BI | Recomendação, similaridade, exploração da rede |
-
----
-
-## 7. Conclusão e Recomendações
-
-1. **Quando adotar o modelo relacional (PostgreSQL)**:
-   * Quando as perguntas são principalmente **agregações** e relatórios sobre grandes volumes (médias, contagens, rankings).
-   * Quando a **integridade estrita** (tipos, domínios, chaves estrangeiras) é obrigatória.
-   * Para análises *ad hoc* de BI, em que as perguntas não são conhecidas de antemão.
-
-2. **Quando adotar o modelo em grafo (Neo4j)**:
-   * Quando as perguntas são sobre **conexões**: recomendação, "amigos de amigos", caminhos, comunidades, detecção de fraude.
-   * Quando o número de saltos é **variável ou desconhecido** na hora de escrever a consulta.
-   * Quando o modelo de relacionamentos muda com frequência (novos tipos de aresta sem migração).
-
-3. **Arquitetura recomendada (persistência poliglota)**: numa plataforma real inspirada no MovieLens, os dois convivem:
-   * **PostgreSQL** como fonte da verdade: cadastro de usuários, filmes, avaliações e assinaturas, com integridade estrita e relatórios.
-   * **Neo4j** alimentado a partir do PostgreSQL, servindo o motor de **recomendação** e a navegação "filmes parecidos".
+RESULTADOS_AQUI

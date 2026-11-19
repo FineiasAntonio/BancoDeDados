@@ -9,10 +9,8 @@ ROOT = Path(__file__).resolve().parent.parent
 
 _TITLE_YEAR = re.compile(r"^(.*?)\s*\((\d{4})\)\s*$")
 
-# Credenciais padrão do docker-compose.yml (podem ser sobrescritas por variáveis de ambiente)
-NEO4J_URI = os.environ.get("NEO4J_URI", "bolt://localhost:7687")
-NEO4J_USER = os.environ.get("NEO4J_USER", "neo4j")
-NEO4J_PASSWORD = os.environ.get("NEO4J_PASSWORD", "neo4jpassword")
+# Endereço padrão do docker-compose.yml (pode ser sobrescrito por variável de ambiente)
+CASSANDRA_HOST = os.environ.get("CASSANDRA_HOST", "127.0.0.1")
 
 
 def extract_title_and_year(raw_title):
@@ -48,20 +46,19 @@ def connect(host="localhost", port=5432, db="movielens", user="postgres", passwo
                   "PostgreSQL", timeout)
 
 
-def connect_neo4j(uri=NEO4J_URI, user=NEO4J_USER, password=NEO4J_PASSWORD, timeout=90):
-    """Driver Neo4j já com a conectividade verificada."""
-    from neo4j import GraphDatabase
+def connect_cassandra(host=CASSANDRA_HOST, keyspace=None, timeout=180):
+    """(cluster, session) do Cassandra. O container leva ~1 min para aceitar conexões."""
+    from cassandra.cluster import Cluster
 
     def _open():
-        driver = GraphDatabase.driver(uri, auth=(user, password))
+        cluster = Cluster([host], connect_timeout=10)
         try:
-            driver.verify_connectivity()
+            return cluster, cluster.connect(keyspace)
         except Exception:
-            driver.close()
+            cluster.shutdown()
             raise
-        return driver
 
-    return _retry(_open, "Neo4j", timeout)
+    return _retry(_open, "Cassandra", timeout)
 
 
 def load_queries(path):
@@ -69,7 +66,7 @@ def load_queries(path):
 
     Cada bloco começa com a linha do marcador, seguida de '-- titulo: ...' (opcional)
     e do texto da consulta. Retorna uma lista de dicts {name, titulo, text}.
-    Assim, relational/queries.sql e neo4j/queries.cypher são a fonte única das
+    Assim, relational/queries.sql e cassandra/queries.cql são a fonte única das
     consultas usadas pelo relatório, pelos scripts de teste e pelo benchmark.
     """
     marker = re.compile(r"^\s*(?:--|//)\s*name:\s*(\S+)\s*$")

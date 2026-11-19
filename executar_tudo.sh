@@ -27,16 +27,16 @@ falhar() {
 }
 
 echo "==============================================================================="
-echo "        PROJETO DE BANCO DE DADOS: RELACIONAL (POSTGRESQL) VS GRAFO (NEO4J)"
+echo "        PROJETO DE BANCO DE DADOS: RELACIONAL (POSTGRESQL) VS CASSANDRA"
 echo "==============================================================================="
 echo "Diretorio atual: $PWD"
 echo
-echo " 0. Subir os containers (PostgreSQL e Neo4j) e baixar os dados do MovieLens"
+echo " 0. Subir os containers (PostgreSQL e Cassandra) e baixar os dados do MovieLens"
 echo " 1. Criar e popular o banco relacional (PostgreSQL / 3FN)"
 echo " 2. Executar as consultas SQL"
-echo " 3. Criar e popular o grafo (Neo4j)"
-echo " 4. Executar as consultas Cypher"
-echo " 5. Medir o tempo das consultas nos dois bancos (benchmark)"
+echo " 3. Criar e popular o Cassandra (tabelas por consulta)"
+echo " 4. Executar as consultas CQL"
+echo " 5. Medir leitura e escrita nos dois bancos (benchmark)"
 echo
 pausar "Pressione qualquer tecla para comecar..."
 
@@ -50,13 +50,13 @@ etapa "[ETAPA 1 de 5] Criando e populando o banco relacional (PostgreSQL / 3FN).
 etapa "[ETAPA 2 de 5] Executando as consultas SQL..."
 "$PY" scripts/test_sql_queries.py
 
-etapa "[ETAPA 3 de 5] Criando e populando o grafo (Neo4j)..."
-"$PY" scripts/load_neo4j.py || falhar "Falha na carga do Neo4j."
+etapa "[ETAPA 3 de 5] Criando e populando o Cassandra..."
+"$PY" scripts/load_cassandra.py || falhar "Falha na carga do Cassandra."
 
-etapa "[ETAPA 4 de 5] Executando as consultas Cypher..."
-"$PY" scripts/test_graph_queries.py
+etapa "[ETAPA 4 de 5] Executando as consultas CQL..."
+"$PY" scripts/test_cassandra_queries.py
 
-etapa "[ETAPA 5 de 5] Medindo o tempo das consultas nos dois bancos..."
+etapa "[ETAPA 5 de 5] Medindo leitura e escrita nos dois bancos..."
 "$PY" scripts/benchmark.py
 
 echo
@@ -66,6 +66,5 @@ echo "==========================================================================
 echo
 echo "Relatorio:  docs/analise.md"
 echo "Benchmark:  docs/resultados_benchmark.md"
-echo "Grafo:      http://localhost:7474 (usuario neo4j, senha neo4jpassword)"
 echo
 pausar "Pressione qualquer tecla para fechar esta janela..."

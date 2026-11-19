@@ -1,6 +1,6 @@
 -- =============================================================================
 -- CONSULTAS DE COMPARAÇÃO - MODELO RELACIONAL (3FN) - POSTGRESQL
--- Equivalentes, uma a uma, às de neo4j/queries.cypher.
+-- Equivalentes, uma a uma, às de cassandra/queries.cql.
 -- Executável com: psql -h localhost -U postgres -d movielens -f relational/queries.sql
 -- Os marcadores "-- name:" são lidos por scripts/test_sql_queries.py e scripts/benchmark.py.
 -- =============================================================================
@@ -77,69 +77,22 @@ ORDER BY m.movie_id
 LIMIT 20;
 
 
--- name: c5_recomendacao
--- titulo: Consulta 5 - "Quem gostou de Toy Story também gostou de..." (2 saltos)
--- Self-join da tabela ratings: usuários que deram >= 4 ao filme 1 e o que mais eles avaliaram bem.
-SELECT
-    m.movie_id,
-    m.title,
-    COUNT(*) AS score
-FROM ratings r1
-JOIN ratings r2 ON r2.user_id = r1.user_id
-              AND r2.movie_id <> r1.movie_id
-JOIN movies m   ON m.movie_id = r2.movie_id
-WHERE r1.movie_id = 1
-  AND r1.rating >= 4
-  AND r2.rating >= 4
-GROUP BY m.movie_id, m.title
-ORDER BY score DESC, m.movie_id
-LIMIT 10;
+-- name: c5_historico_usuario
+-- titulo: Consulta 5 - Histórico recente do usuário 42 (últimas 20 avaliações)
+-- Usa o índice (user_id, rated_at) de ratings.
+SELECT r.movie_id, r.rating, r.rated_at
+FROM ratings r
+WHERE r.user_id = 42
+ORDER BY r.rated_at DESC, r.movie_id
+LIMIT 20;
 
 
--- name: c6_similares_tags
--- titulo: Consulta 6 - Filmes com mais tags em comum com Toy Story
-WITH movie_tag AS (
-    SELECT DISTINCT movie_id, tag_id FROM user_movie_tags
-)
-SELECT
-    m.movie_id,
-    m.title,
-    COUNT(*) AS tags_em_comum,
-    string_agg(t.tag_name, ', ' ORDER BY t.tag_name) AS tags
-FROM movie_tag a
-JOIN movie_tag b ON b.tag_id = a.tag_id AND b.movie_id <> a.movie_id
-JOIN movies m    ON m.movie_id = b.movie_id
-JOIN tags t      ON t.tag_id = a.tag_id
-WHERE a.movie_id = 1
-GROUP BY m.movie_id, m.title
-ORDER BY tags_em_comum DESC, m.movie_id
-LIMIT 10;
-
-
--- name: c7_recomendacao_usuario
--- titulo: Consulta 7 - Recomendações personalizadas para o usuário 42 (3 saltos)
--- Filtragem colaborativa: (1) acha os 20 usuários com mais filmes bem avaliados em comum
--- com o usuário 42; (2) sugere o que esses usuários avaliaram bem e o 42 ainda não viu.
-WITH vizinhos AS (
-    SELECT r2.user_id, COUNT(*) AS em_comum
-    FROM ratings r1
-    JOIN ratings r2 ON r2.movie_id = r1.movie_id
-                   AND r2.user_id <> r1.user_id
-    WHERE r1.user_id = 42
-      AND r1.rating >= 4
-      AND r2.rating >= 4
-    GROUP BY r2.user_id
-    ORDER BY em_comum DESC, r2.user_id
-    LIMIT 20
-)
-SELECT m.movie_id, m.title, COUNT(*) AS score
-FROM vizinhos v
-JOIN ratings r3 ON r3.user_id = v.user_id AND r3.rating >= 4
-JOIN movies m   ON m.movie_id = r3.movie_id
-WHERE NOT EXISTS (
-    SELECT 1 FROM ratings ja_viu
-    WHERE ja_viu.user_id = 42 AND ja_viu.movie_id = r3.movie_id
-)
-GROUP BY m.movie_id, m.title
-ORDER BY score DESC, m.movie_id
-LIMIT 10;
+-- name: c6_periodo_filme
+-- titulo: Consulta 6 - Avaliações de Toy Story em janeiro de 2015
+-- Usa o índice (movie_id, rated_at) de ratings.
+SELECT r.user_id, r.rating, r.rated_at
+FROM ratings r
+WHERE r.movie_id = 1
+  AND r.rated_at >= '2015-01-01'
+  AND r.rated_at <  '2015-02-01'
+ORDER BY r.rated_at DESC, r.user_id;

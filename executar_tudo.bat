@@ -11,16 +11,16 @@ if exist "BancoDeDados\scripts" (
 )
 
 echo ===============================================================================
-echo         PROJETO DE BANCO DE DADOS: RELACIONAL (POSTGRESQL) VS GRAFO (NEO4J)
+echo         PROJETO DE BANCO DE DADOS: RELACIONAL (POSTGRESQL) VS CASSANDRA
 echo ===============================================================================
 echo Diretorio atual: %CD%
 echo.
-echo  0. Subir os containers (PostgreSQL e Neo4j) e baixar os dados do MovieLens
+echo  0. Subir os containers (PostgreSQL e Cassandra) e baixar os dados do MovieLens
 echo  1. Criar e popular o banco relacional (PostgreSQL / 3FN)
 echo  2. Executar as consultas SQL
-echo  3. Criar e popular o grafo (Neo4j)
-echo  4. Executar as consultas Cypher
-echo  5. Medir o tempo das consultas nos dois bancos (benchmark)
+echo  3. Criar e popular o Cassandra (tabelas por consulta)
+echo  4. Executar as consultas CQL
+echo  5. Medir leitura e escrita nos dois bancos (benchmark)
 echo.
 echo Pressione qualquer tecla para comecar...
 pause > nul
@@ -61,24 +61,24 @@ python scripts/test_sql_queries.py
 
 echo.
 echo -------------------------------------------------------------------------------
-echo [ETAPA 3 de 5] Criando e populando o grafo (Neo4j)...
+echo [ETAPA 3 de 5] Criando e populando o Cassandra...
 echo -------------------------------------------------------------------------------
-python scripts/load_neo4j.py
+python scripts/load_cassandra.py
 if %ERRORLEVEL% NEQ 0 (
-    echo [ERRO] Falha na carga do Neo4j.
+    echo [ERRO] Falha na carga do Cassandra.
     pause
     exit /b
 )
 
 echo.
 echo -------------------------------------------------------------------------------
-echo [ETAPA 4 de 5] Executando as consultas Cypher...
+echo [ETAPA 4 de 5] Executando as consultas CQL...
 echo -------------------------------------------------------------------------------
-python scripts/test_graph_queries.py
+python scripts/test_cassandra_queries.py
 
 echo.
 echo -------------------------------------------------------------------------------
-echo [ETAPA 5 de 5] Medindo o tempo das consultas nos dois bancos...
+echo [ETAPA 5 de 5] Medindo leitura e escrita nos dois bancos...
 echo -------------------------------------------------------------------------------
 python scripts/benchmark.py
 
@@ -89,7 +89,6 @@ echo ===========================================================================
 echo.
 echo Relatorio:  docs\analise.md
 echo Benchmark:  docs\resultados_benchmark.md
-echo Grafo:      http://localhost:7474 (usuario neo4j, senha neo4jpassword)
 echo.
 echo Pressione qualquer tecla para fechar esta janela...
 pause > nul
