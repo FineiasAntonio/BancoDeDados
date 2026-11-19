@@ -1,7 +1,7 @@
 """Download e extração do MovieLens 20M (GroupLens) para data/raw/.
 
 Baixa o pacote oficial ml-20m.zip, extrai os CSVs e os renomeia para os
-nomes no singular que os scripts de ETL (load_relational.py / transform.py)
+nomes no singular que os scripts de ETL (load_relational.py / load_neo4j.py)
 esperam encontrar em data/raw/.
 """
 

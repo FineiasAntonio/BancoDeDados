@@ -2,110 +2,51 @@
 """
 scripts/test_sql_queries.py
 --------------------------------------------------------------------------------
-Executa as 4 consultas de benchmark do modelo relacional (3FN) no PostgreSQL
-e exibe os resultados formatados no terminal para comparação com o NoSQL.
+Executa no PostgreSQL as consultas de relational/queries.sql e exibe os
+resultados no terminal, para comparação com o Neo4j (test_graph_queries.py).
 --------------------------------------------------------------------------------
 """
 
-import warnings
+import argparse
 
-import pandas as pd
+import psycopg2
 
-from common import connect
+from common import ROOT, connect, load_queries
 
-warnings.filterwarnings("ignore", message="pandas only supports SQLAlchemy")
 
-pd.set_option("display.max_columns", None)
-pd.set_option("display.width", 1000)
+def print_table(columns, rows):
+    if not rows:
+        print("  (nenhuma linha)")
+        return
+    cells = [[("" if v is None else str(v)) for v in row] for row in rows]
+    widths = [max(len(c), *(len(r[i]) for r in cells)) for i, c in enumerate(columns)]
+    print("  " + " | ".join(c.ljust(w) for c, w in zip(columns, widths)))
+    print("  " + "-+-".join("-" * w for w in widths))
+    for r in cells:
+        print("  " + " | ".join(v.ljust(w) for v, w in zip(r, widths)))
 
 
 def main():
+    p = argparse.ArgumentParser(description="Consultas de comparação no PostgreSQL")
+    p.add_argument("--timeout", type=int, default=60, help="Timeout por consulta, em segundos.")
+    args = p.parse_args()
+
     conn = connect()
-
+    conn.autocommit = True
     print("=" * 80)
-    print("DEMONSTRAÇÃO DAS CONSULTAS RELACIONAIS (3FN) - POSTGRESQL")
-    print("Banco de Dados: postgresql://localhost:5432/movielens")
+    print("CONSULTAS NO MODELO RELACIONAL (3FN) - POSTGRESQL")
     print("=" * 80)
-
-    # Consulta 1
-    print("\n>>> CONSULTA 1: Detalhes de um Filme (Toy Story) via 4 JOINs e GROUP BY")
-    q1 = """
-    SELECT 
-        m.movie_id,
-        m.title,
-        m.release_year,
-        l.imdb_id,
-        l.tmdb_id,
-        string_agg(DISTINCT g.name, ',') AS genres,
-        COUNT(r.rating) AS total_ratings,
-        ROUND(AVG(r.rating), 2) AS avg_rating
-    FROM movies m
-    LEFT JOIN movie_links l ON m.movie_id = l.movie_id
-    LEFT JOIN movie_genres mg ON m.movie_id = mg.movie_id
-    LEFT JOIN genres g ON mg.genre_id = g.genre_id
-    LEFT JOIN ratings r ON m.movie_id = r.movie_id
-    WHERE m.movie_id = 1
-    GROUP BY m.movie_id, m.title, m.release_year, l.imdb_id, l.tmdb_id;
-    """
-    df1 = pd.read_sql_query(q1, conn)
-    print(df1.to_string(index=False))
-
-    # Consulta 2
-    print("\n>>> CONSULTA 2: Top 5 Filmes mais bem avaliados (mínimo de 50 votos)")
-    q2 = """
-    SELECT 
-        m.movie_id,
-        m.title,
-        m.release_year,
-        COUNT(r.rating) AS vote_count,
-        ROUND(AVG(r.rating), 3) AS average_rating
-    FROM movies m
-    JOIN ratings r ON m.movie_id = r.movie_id
-    GROUP BY m.movie_id, m.title, m.release_year
-    HAVING COUNT(r.rating) >= 50
-    ORDER BY average_rating DESC, vote_count DESC
-    LIMIT 5;
-    """
-    df2 = pd.read_sql_query(q2, conn)
-    print(df2.to_string(index=False))
-
-    # Consulta 3
-    print("\n>>> CONSULTA 3: Total de Filmes e Média de Notas por Gênero (JOIN N:M)")
-    q3 = """
-    SELECT 
-        g.name AS genre,
-        COUNT(DISTINCT m.movie_id) AS total_movies,
-        ROUND(AVG(r.rating), 2) AS avg_genre_rating
-    FROM genres g
-    JOIN movie_genres mg ON g.genre_id = mg.genre_id
-    JOIN movies m ON mg.movie_id = m.movie_id
-    LEFT JOIN ratings r ON m.movie_id = r.movie_id
-    GROUP BY g.genre_id, g.name
-    ORDER BY total_movies DESC
-    LIMIT 5;
-    """
-    df3 = pd.read_sql_query(q3, conn)
-    print(df3.to_string(index=False))
-
-    # Consulta 4
-    print("\n>>> CONSULTA 4: Busca por Tags ('pixar' ou 'animation') via JOIN Triplo")
-    q4 = """
-    SELECT DISTINCT
-        m.movie_id,
-        m.title,
-        m.release_year,
-        t.tag_name
-    FROM movies m
-    JOIN user_movie_tags umt ON m.movie_id = umt.movie_id
-    JOIN tags t ON umt.tag_id = t.tag_id
-    WHERE t.tag_name IN ('pixar', 'animation')
-    LIMIT 5;
-    """
-    df4 = pd.read_sql_query(q4, conn)
-    print(df4.to_string(index=False))
-
-    print("\n" + "=" * 80)
+    with conn.cursor() as cur:
+        cur.execute(f"SET statement_timeout = '{args.timeout}s'")
+        for q in load_queries(ROOT / "relational" / "queries.sql"):
+            print(f"\n>>> {q['titulo']}")
+            try:
+                cur.execute(q["text"])
+                print_table([d.name for d in cur.description], cur.fetchall())
+            except psycopg2.errors.QueryCanceled:
+                print(f"  [!] Cancelada: passou do limite de {args.timeout}s.")
     conn.close()
+    print("\n" + "=" * 80)
 
 
 if __name__ == "__main__":

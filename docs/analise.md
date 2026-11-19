@@ -1,19 +1,20 @@
-# Análise Comparativa: Banco de Dados Relacional (PostgreSQL) vs. Não-Relacional Orientado a Documentos (MongoDB)
+# Análise Comparativa: Banco de Dados Relacional (PostgreSQL) vs. Banco de Dados em Grafo (Neo4j)
 
-**Dataset Analisado:** MovieLens 20M (GroupLens Research)  
-**Contexto:** Estudo comparativo de engenharia de dados entre os paradigmas **Relacional (3FN)** e **NoSQL (Document Store)**.
+**Dataset analisado:** MovieLens 20M (GroupLens Research)  
+**Contexto:** estudo comparativo entre os paradigmas **Relacional (3FN)** e **NoSQL orientado a Grafos (Property Graph)**.
 
 ---
 
 ## 1. Introdução e Contextualização do Problema
 
-O objetivo deste estudo é analisar, modelar, implementar e confrontar duas abordagens fundamentais de gerenciamento de dados utilizando uma mesma base de dados pública: o conceituado dataset **MovieLens 20M**.
+O objetivo deste estudo é modelar, implementar e confrontar duas abordagens de gerenciamento de dados sobre a mesma base pública: o dataset **MovieLens 20M**.
 
-O dataset original é composto por atributos cadastrais de obras cinematográficas (`movie.csv`), links para catálogos externos (`link.csv`), termos de indexação semântica atribuídos por usuários (`tag.csv`) e um volume massivo de mais de **20 milhões de avaliações** numéricas (`rating.csv`).
+O dataset é composto por atributos cadastrais de filmes (`movie.csv`), links para catálogos externos (`link.csv`), termos atribuídos livremente por usuários (`tag.csv`) e mais de **20 milhões de avaliações** numéricas (`rating.csv`).
 
-O desafio arquitetural reside em como representar essas relações em dois paradigmas antagônicos:
-1. **Paradigma Relacional**: Focado na **eliminação de redundâncias** através das regras formais de normalização de Edgar F. Codd (1FN, 2FN e 3FN), garantindo integridade estrita via chaves primárias e estrangeiras com propriedades **ACID**.
-2. **Paradigma Não-Relacional (Documental)**: Focado em **otimização de leitura e escalabilidade**, utilizando desnormalização consciente, incorporação (*embedding*) de estruturas hierárquicas e agregação pré-computada (*Computed Pattern*).
+Escolhemos um banco em **grafo** como contraponto ao relacional porque o MovieLens é, na sua essência, uma **rede**: usuários ligados a filmes pelas avaliações, filmes ligados a gêneros e a tags. A pergunta mais valiosa que se faz a esse tipo de dado — *"que filme recomendar a esta pessoa?"* — é uma pergunta sobre **caminhos** nessa rede.
+
+1. **Paradigma Relacional**: dados em tabelas, **sem redundância** pelas regras de normalização (1FN, 2FN e 3FN), com integridade garantida por chaves primárias e estrangeiras e transações **ACID**. Relacionamentos são *calculados* no momento da consulta, via `JOIN`.
+2. **Paradigma em Grafo**: dados como **nós** (entidades) e **arestas** (relacionamentos), ambos com propriedades. Relacionamentos são *armazenados* fisicamente: cada nó guarda ponteiros diretos para seus vizinhos (*index-free adjacency*), de modo que percorrer uma aresta custa o mesmo independentemente do tamanho total da base.
 
 ---
 
@@ -21,10 +22,18 @@ O desafio arquitetural reside em como representar essas relações em dois parad
 
 ### 2.1. Abordagem Relacional (PostgreSQL - 3FN)
 
-No modelo relacional, a base bruta foi submetida ao processo rigoroso de normalização:
-* **1ª Forma Normal (1FN)**: O atributo multivalorado `genres` (ex: `"Action|Adventure|Sci-Fi"`) foi atomizado em uma tabela catálogo `genres` e uma associativa $N:M$ `movie_genres`. O campo composto `title` foi quebrado em `title` e `release_year`.
-* **2ª Forma Normal (2FN)**: Chaves compostas como `(user_id, movie_id)` em `ratings` foram isoladas para que nenhum atributo não-chave dependesse parcialmente da chave primária.
-* **3ª Forma Normal (3FN)**: Os textos de tags livres foram segregados em um catálogo unívoco `tags` (`tag_id`, `tag_name`), eliminando a repetição textual de strings em centenas de milhares de linhas e evitando anomalias de atualização. Os identificadores externos do IMDb e TMDb foram isolados na relação $1:1$ `movie_links`.
+A base bruta foi normalizada da seguinte forma:
+
+* **1ª Forma Normal (1FN)** — todo atributo deve ser atômico:
+  * O atributo multivalorado `genres` (ex.: `"Action|Adventure|Sci-Fi"`) foi decomposto na tabela catálogo `genres` e na associativa $N:M$ `movie_genres`.
+  * O título composto `"Toy Story (1995)"` foi separado em `title` e `release_year`.
+* **2ª Forma Normal (2FN)** — nenhum atributo não-chave pode depender de **parte** de uma chave composta. Em `ratings`, a chave é `(user_id, movie_id)` e tanto `rating` quanto `rated_at` dependem do par completo (a nota é *de um usuário para um filme*). Não há dependência parcial: a tabela já está em 2FN. O mesmo vale para `movie_genres` e `user_movie_tags`.
+* **3ª Forma Normal (3FN)** — nenhum atributo não-chave pode depender de outro atributo não-chave. Em `movies`, `title` e `release_year` dependem apenas de `movie_id`; em `movie_links`, `imdb_id` e `tmdb_id` também. Não há dependências transitivas no modelo.
+
+Duas decisões **de projeto** (que vão além do exigido pela 3FN) merecem registro:
+
+* **Catálogo de tags** (`tags` + `user_movie_tags`): o texto da tag não depende transitivamente de nada — ele é o próprio dado. Separá-lo num catálogo com chave substituta (`tag_id`) é uma escolha para **evitar repetir a mesma string** em centenas de milhares de linhas e padronizar a grafia (minúsculas, sem espaços nas pontas).
+* **Links externos em tabela 1:1** (`movie_links`): também não é exigência da 3FN (os IDs dependem diretamente de `movie_id`). A separação isola metadados de fontes externas que nem todo filme possui (`tmdb_id` ausente em alguns casos).
 
 ```mermaid
 erDiagram
@@ -76,268 +85,299 @@ erDiagram
     }
 ```
 
-> **Diagrama Gráfico Exportado:**  
-> ![Diagrama Entidade Relacionamento 3FN](der.png)
+> O diagrama editável está em [`der.drawio`](der.drawio) e o modelo lógico em [`modelo_logico.puml`](modelo_logico.puml).
 
-
-* **Resultado Relacional**: Os dados ficaram distribuídos em **8 tabelas distintas**.
+* **Resultado relacional**: **8 tabelas**.
 
 ---
 
-### 2.2. Abordagem Não-Relacional (MongoDB)
+### 2.2. Abordagem em Grafo (Neo4j)
 
-No MongoDB, abandonamos a pulverização de tabelas e projetamos a base considerando o princípio basilar do NoSQL: **"Dados consultados em conjunto devem ser armazenados em conjunto"**.
+No grafo, a pergunta de modelagem muda de *"quais são as dependências funcionais?"* para *"quais são as coisas e como elas se ligam?"*. Cada tabela associativa do modelo relacional deixa de existir e vira **aresta**.
 
-A arquitetura documental foi estruturada em apenas **2 coleções**:
-
-1. **Coleção `movies` (Documento Rico com Embedding)**:
-   * **Gêneros Incorporados**: Array de strings (`["Adventure", "Animation", "Children"]`). Cardinalidade baixa e estática (1 a 6 elementos). Evita junções e viabiliza índices *Multikey*.
-   * **Links Incorporados**: Subdocumento `{ imdb: "0114709", tmdb: 862 }`. Relação $1:1$ fixa.
-   * **Tags Únicas Incorporadas**: Array com o vocabulário de termos associados ao filme, permitindo busca textual indexada direta.
-   * **Métricas Pré-computadas**: Subdocumento `{ avg_rating: 3.97, rating_count: 241 }` utilizando o padrão de projeto *Computed Pattern*. Elimina o custo de varrer 20 milhões de avaliações a cada requisição de catálogo.
-
-2. **Coleção `ratings` (Coleção Referenciada)**:
-   * **Decisão Arquitetural Crítica**: As 20 milhões de avaliações **não** foram incorporadas no filme.
-   * **Motivo**: Incorporar 50.000 avaliações no documento de *Toy Story* violaria ou consumiria perigosamente o **limite de 16 MB por documento BSON** do MongoDB, causaria fragmentação contínua de blocos em disco (*Document Growth Penalty*) e sobrecarregaria a memória com dados desnecessários na renderização da ficha técnica da obra.
-
-```json
-// Documento Representativo na Coleção 'movies' (MongoDB)
-{
-  "_id": 1,
-  "title": "Toy Story",
-  "release_year": 1995,
-  "genres": ["Adventure", "Animation", "Children", "Comedy", "Fantasy"],
-  "links": {
-    "imdb": "0114709",
-    "tmdb": 862
-  },
-  "metrics": {
-    "avg_rating": 3.97,
-    "rating_count": 241
-  },
-  "tags": ["animation", "pixar", "toys", "disney"]
-}
+```mermaid
+graph LR
+    U((User)) -- "RATED<br/>{rating, rated_at}" --> M((Movie))
+    M -- IN_GENRE --> G((Genre))
+    M -- "HAS_TAG<br/>{count}" --> T((Tag))
 ```
 
+| Elemento | Tipo | Propriedades | Origem relacional |
+| :--- | :--- | :--- | :--- |
+| `(:User)` | nó | `user_id` | `users` |
+| `(:Movie)` | nó | `movie_id`, `title`, `release_year`, `imdb_id`, `tmdb_id` | `movies` + `movie_links` |
+| `(:Genre)` | nó | `name` | `genres` |
+| `(:Tag)` | nó | `name` | `tags` |
+| `[:RATED]` | aresta User → Movie | `rating`, `rated_at` | `ratings` |
+| `[:IN_GENRE]` | aresta Movie → Genre | — | `movie_genres` |
+| `[:HAS_TAG]` | aresta Movie → Tag | `count` (quantos usuários aplicaram a tag) | `user_movie_tags` agregado |
+
+Decisões de modelagem:
+
+* **Tabelas associativas viram arestas**: `ratings` e `movie_genres` não são entidades, são relações. No grafo, a nota e a data passam a ser **propriedades da aresta** `RATED`.
+* **Links externos como propriedades do filme**: uma relação 1:1 não justifica um nó próprio; `imdb_id` e `tmdb_id` ficam no nó `:Movie`.
+* **Tags agregadas por filme**: a etiquetagem original é uma relação **ternária** (usuário, filme, tag), e arestas no modelo de grafo de propriedades ligam só **dois** nós. Representá-la fielmente exigiria *reificar* a relação num nó intermediário `(:Tagging)`. Como todas as consultas usam as tags para descrever filmes, optamos por uma aresta `HAS_TAG` por par (filme, tag), com a propriedade `count`. **Perde-se** a informação de quem aplicou a tag e quando — uma limitação consciente, registrada aqui.
+* **Integridade mínima**: o Neo4j não tem esquema obrigatório nem chaves estrangeiras. As únicas garantias impostas pelo banco são as *constraints* de unicidade em `user_id`, `movie_id`, `Genre.name` e `Tag.name` (ver [`neo4j/schema.cypher`](../neo4j/schema.cypher)). Em compensação, uma aresta **não pode** apontar para um nó inexistente: não existem "referências órfãs" no grafo.
+
+* **Resultado em grafo**: **4 rótulos de nó** e **3 tipos de aresta**.
+
 ---
 
-## 3. Confronto Direto de Consultas (SQL vs. MQL)
+## 3. Confronto Direto de Consultas (SQL vs. Cypher)
 
-A seguir, confrontamos 4 consultas essenciais de negócio nas duas abordagens:
+As sete consultas abaixo estão em [`relational/queries.sql`](../relational/queries.sql) e [`neo4j/queries.cypher`](../neo4j/queries.cypher), e devolvem **os mesmos resultados** nos dois bancos (verificado pelos scripts `test_sql_queries.py` e `test_graph_queries.py`). Elas foram escolhidas para cobrir os dois lados: consultas em que o relacional é naturalmente forte (agregações sobre a base inteira) e consultas em que o grafo é naturalmente forte (navegar relacionamentos).
 
-### Consulta 1: Detalhes Completos de um Filme
+### Consulta 1: Ficha completa de um filme
 
-* **Objetivo**: Recuperar título, ano, identificadores externos, lista de gêneros e média de avaliações do filme ID 1 (*Toy Story*).
-
-#### No Modelo Relacional (SQL):
 ```sql
-SELECT 
-    m.movie_id,
-    m.title,
-    m.release_year,
-    l.imdb_id,
-    l.tmdb_id,
-    string_agg(DISTINCT g.name, ',') AS genres,
-    COUNT(r.rating) AS total_ratings,
-    ROUND(AVG(r.rating), 2) AS avg_rating
+SELECT m.movie_id, m.title, m.release_year, l.imdb_id, l.tmdb_id,
+       (SELECT string_agg(g.name, ', ' ORDER BY g.name)
+          FROM movie_genres mg JOIN genres g ON g.genre_id = mg.genre_id
+         WHERE mg.movie_id = m.movie_id) AS genres,
+       r.total_ratings, r.avg_rating
 FROM movies m
-LEFT JOIN movie_links l ON m.movie_id = l.movie_id
-LEFT JOIN movie_genres mg ON m.movie_id = mg.movie_id
-LEFT JOIN genres g ON mg.genre_id = g.genre_id
-LEFT JOIN ratings r ON m.movie_id = r.movie_id
-WHERE m.movie_id = 1
-GROUP BY m.movie_id, m.title, m.release_year, l.imdb_id, l.tmdb_id;
+LEFT JOIN movie_links l ON l.movie_id = m.movie_id
+CROSS JOIN LATERAL (
+    SELECT COUNT(*) AS total_ratings, ROUND(AVG(rating), 2) AS avg_rating
+      FROM ratings WHERE movie_id = m.movie_id
+) r
+WHERE m.movie_id = 1;
 ```
-* **Complexidade no Relacional**: O banco precisa ler a tabela de filmes, efetuar 4 operações de junção (`Nested Loop` ou `Hash Join`), escanear a tabela de junção $N:M$, agrupar os resultados na memória e computar agregações em tempo de execução.
 
-#### No Modelo Documental (MongoDB):
-```javascript
-db.movies.findOne(
-    { _id: 1 },
-    { title: 1, release_year: 1, genres: 1, links: 1, metrics: 1 }
-);
+```cypher
+MATCH (m:Movie {movie_id: 1})
+OPTIONAL MATCH (m)-[:IN_GENRE]->(g:Genre)
+WITH m, g ORDER BY g.name
+WITH m, collect(g.name) AS genres
+OPTIONAL MATCH (:User)-[r:RATED]->(m)
+RETURN m.movie_id, m.title, m.release_year, m.imdb_id, m.tmdb_id, genres,
+       count(r) AS total_ratings, round(avg(r.rating), 2) AS avg_rating;
 ```
-* **Complexidade no MongoDB**: Busca direta pela chave primária `_id` em tempo **$O(1)$** no índice B-Tree principal. Todos os dados já estão contíguos no mesmo documento BSON. Zero operações de junção.
 
----
+* **Armadilha do SQL**: a versão ingênua (juntar `movie_genres` e `ratings` no mesmo `FROM`) multiplica cada avaliação pelo número de gêneros do filme e infla a contagem. Por isso as avaliações são agregadas numa subconsulta `LATERAL`. No Cypher o problema não aparece: os gêneros são coletados antes de expandir as avaliações.
 
-### Consulta 2: Top 10 Filmes Mais Bem Avaliados (Mínimo de 50 Votos)
+### Consulta 2: Top 10 filmes mais bem avaliados (mínimo de 50 votos)
 
-#### No Modelo Relacional (SQL):
 ```sql
-SELECT 
-    m.movie_id,
-    m.title,
-    m.release_year,
-    COUNT(r.rating) AS vote_count,
-    ROUND(AVG(r.rating), 3) AS average_rating
+SELECT m.movie_id, m.title, m.release_year,
+       COUNT(*) AS vote_count, ROUND(AVG(r.rating), 3) AS average_rating
 FROM movies m
-JOIN ratings r ON m.movie_id = r.movie_id
+JOIN ratings r ON r.movie_id = m.movie_id
 GROUP BY m.movie_id, m.title, m.release_year
-HAVING COUNT(r.rating) >= 50
-ORDER BY average_rating DESC, vote_count DESC
+HAVING COUNT(*) >= 50
+ORDER BY AVG(r.rating) DESC, vote_count DESC, m.movie_id
 LIMIT 10;
 ```
 
-#### No Modelo Documental (MongoDB):
-* **Opção A (Via dados pré-computados - Padrão Computed)**:
-```javascript
-db.movies.find(
-    { "metrics.rating_count": { $gte: 50 } },
-    { title: 1, release_year: 1, "metrics.avg_rating": 1, "metrics.rating_count": 1 }
-).sort({ "metrics.avg_rating": -1, "metrics.rating_count": -1 }).limit(10);
-```
-* **Opção B (Via Aggregation Pipeline dinâmico na coleção `ratings`)**:
-```javascript
-db.ratings.aggregate([
-    { $group: { _id: "$movie_id", avg_rating: { $avg: "$rating" }, vote_count: { $sum: 1 } } },
-    { $match: { vote_count: { $gte: 50 } } },
-    { $sort: { avg_rating: -1, vote_count: -1 } },
-    { $limit: 10 },
-    { $lookup: { from: "movies", localField: "_id", foreignField: "_id", as: "movie" } },
-    { $unwind: "$movie" },
-    { $project: { title: "$movie.title", release_year: "$movie.release_year", avg_rating: { $round: ["$avg_rating", 3] }, vote_count: 1 } }
-]);
+```cypher
+MATCH (:User)-[r:RATED]->(m:Movie)
+WITH m, count(r) AS vote_count, avg(r.rating) AS media
+WHERE vote_count >= 50
+RETURN m.movie_id, m.title, m.release_year, vote_count, round(media, 3) AS average_rating
+ORDER BY media DESC, vote_count DESC, m.movie_id
+LIMIT 10;
 ```
 
----
+* **Terreno do relacional**: é uma agregação sobre **todas** as avaliações. O PostgreSQL lê a tabela `ratings` sequencialmente (dados contíguos, compactos) e agrupa com *hash aggregate*. O Neo4j precisa visitar cada aresta `RATED` individualmente.
 
-### Consulta 3: Agrupamento e Distribuição por Gênero
+### Consulta 3: Filmes e média das avaliações por gênero
 
-#### No Modelo Relacional (SQL):
 ```sql
-SELECT 
-    g.name AS genre,
-    COUNT(DISTINCT m.movie_id) AS total_movies,
-    ROUND(AVG(r.rating), 2) AS avg_genre_rating
+SELECT g.name AS genre, COUNT(DISTINCT mg.movie_id) AS total_movies,
+       COUNT(r.rating) AS total_ratings, ROUND(AVG(r.rating), 2) AS avg_genre_rating
 FROM genres g
-JOIN movie_genres mg ON g.genre_id = mg.genre_id
-JOIN movies m ON mg.movie_id = m.movie_id
-LEFT JOIN ratings r ON m.movie_id = r.movie_id
+JOIN movie_genres mg ON mg.genre_id = g.genre_id
+LEFT JOIN ratings r  ON r.movie_id = mg.movie_id
 GROUP BY g.genre_id, g.name
-ORDER BY total_movies DESC;
+ORDER BY total_movies DESC, genre;
 ```
 
-#### No Modelo Documental (MongoDB):
-```javascript
-db.movies.aggregate([
-    { $unwind: "$genres" },
-    {
-        $group: {
-            _id: "$genres",
-            total_movies: { $sum: 1 },
-            avg_genre_rating: { $avg: "$metrics.avg_rating" }
-        }
-    },
-    { $project: { genre: "$_id", _id: 0, total_movies: 1, avg_genre_rating: { $round: ["$avg_genre_rating", 2] } } },
-    { $sort: { total_movies: -1 } }
-]);
+```cypher
+MATCH (g:Genre)<-[:IN_GENRE]-(m:Movie)
+OPTIONAL MATCH (:User)-[r:RATED]->(m)
+WITH g, count(DISTINCT m) AS total_movies, count(r) AS total_ratings, avg(r.rating) AS media
+RETURN g.name AS genre, total_movies, total_ratings, round(media, 2) AS avg_genre_rating
+ORDER BY total_movies DESC, genre;
 ```
-* **Análise Técnica**: O operador `$unwind` no MongoDB descompacta o array de gêneros em tuplas temporárias no fluxo de agregação, operando de forma análoga a uma junção relacional em memória.
 
----
+* A média é calculada sobre **todas as avaliações** dos filmes do gênero (filmes com mais votos pesam mais), igual nos dois bancos.
 
-### Consulta 4: Busca por Termos de Etiquetagem (Tags)
+### Consulta 4: Filmes marcados com `pixar` ou `animation`
 
-* **Objetivo**: Localizar filmes etiquetados como `'pixar'` ou `'animation'`.
-
-#### No Modelo Relacional (SQL):
 ```sql
-SELECT DISTINCT
-    m.movie_id,
-    m.title,
-    m.release_year,
-    t.tag_name
+SELECT m.movie_id, m.title, m.release_year, string_agg(DISTINCT t.tag_name, ', ') AS matched_tags
 FROM movies m
-JOIN user_movie_tags umt ON m.movie_id = umt.movie_id
-JOIN tags t ON umt.tag_id = t.tag_id
+JOIN user_movie_tags umt ON umt.movie_id = m.movie_id
+JOIN tags t              ON t.tag_id = umt.tag_id
 WHERE t.tag_name IN ('pixar', 'animation')
-LIMIT 20;
+GROUP BY m.movie_id, m.title, m.release_year
+ORDER BY m.movie_id LIMIT 20;
 ```
-* Exige junção tripla entre `movies`, a tabela intermediária `user_movie_tags` e a tabela `tags`.
 
-#### No Modelo Documental (MongoDB):
-```javascript
-db.movies.find(
-    { tags: { $in: ["pixar", "animation"] } },
-    { title: 1, release_year: 1, tags: 1, genres: 1 }
-).limit(20);
+```cypher
+MATCH (m:Movie)-[:HAS_TAG]->(t:Tag)
+WHERE t.name IN ['pixar', 'animation']
+WITH m, t.name AS tag ORDER BY tag
+WITH m, collect(tag) AS matched_tags
+RETURN m.movie_id, m.title, m.release_year, matched_tags
+ORDER BY m.movie_id LIMIT 20;
 ```
-* O MongoDB utiliza seu **índice *Multikey*** diretamente sobre o array `tags`, encontrando as correspondências sem nenhuma junção.
+
+* O Neo4j encontra os dois nós `:Tag` pelo índice de unicidade e então só segue as arestas que saem deles. O SQL faz o mesmo caminho lógico, mas via índices em `tags.tag_name` e `user_movie_tags.tag_id`.
+
+### Consulta 5: "Quem gostou de Toy Story também gostou de..." (recomendação, 2 saltos)
+
+```sql
+SELECT m.movie_id, m.title, COUNT(*) AS score
+FROM ratings r1
+JOIN ratings r2 ON r2.user_id = r1.user_id AND r2.movie_id <> r1.movie_id
+JOIN movies m   ON m.movie_id = r2.movie_id
+WHERE r1.movie_id = 1 AND r1.rating >= 4 AND r2.rating >= 4
+GROUP BY m.movie_id, m.title
+ORDER BY score DESC, m.movie_id LIMIT 10;
+```
+
+```cypher
+MATCH (:Movie {movie_id: 1})<-[r1:RATED]-(u:User)-[r2:RATED]->(rec:Movie)
+WHERE r1.rating >= 4 AND r2.rating >= 4
+RETURN rec.movie_id, rec.title, count(u) AS score
+ORDER BY score DESC, rec.movie_id LIMIT 10;
+```
+
+* **Legibilidade**: o padrão Cypher é o desenho do próprio caminho *filme ← usuário → outro filme*. No SQL, a mesma ideia exige um *self-join* da tabela `ratings` com ela mesma, que é bem menos evidente para quem lê.
+* **Desempenho**: com 2 saltos e os índices certos (`ratings(movie_id)` e a PK que começa por `user_id`), o PostgreSQL resolve bem. A diferença de desempenho do grafo aparece com **mais saltos** — ver Consulta 7.
+
+### Consulta 6: Filmes com mais tags em comum com Toy Story
+
+```sql
+WITH movie_tag AS (SELECT DISTINCT movie_id, tag_id FROM user_movie_tags)
+SELECT m.movie_id, m.title, COUNT(*) AS tags_em_comum,
+       string_agg(t.tag_name, ', ' ORDER BY t.tag_name) AS tags
+FROM movie_tag a
+JOIN movie_tag b ON b.tag_id = a.tag_id AND b.movie_id <> a.movie_id
+JOIN movies m    ON m.movie_id = b.movie_id
+JOIN tags t      ON t.tag_id = a.tag_id
+WHERE a.movie_id = 1
+GROUP BY m.movie_id, m.title
+ORDER BY tags_em_comum DESC, m.movie_id LIMIT 10;
+```
+
+```cypher
+MATCH (:Movie {movie_id: 1})-[:HAS_TAG]->(t:Tag)<-[:HAS_TAG]-(o:Movie)
+WITH o, t.name AS tag ORDER BY tag
+RETURN o.movie_id, o.title, count(*) AS tags_em_comum, collect(tag) AS tags
+ORDER BY tags_em_comum DESC, o.movie_id LIMIT 10;
+```
+
+* Similaridade por vizinhança: dois filmes são parecidos se compartilham vizinhos (tags). No SQL é preciso primeiro **deduplicar** `user_movie_tags` (vários usuários aplicam a mesma tag ao mesmo filme); no grafo esse trabalho já foi feito na carga, com a aresta `HAS_TAG {count}`.
+
+### Consulta 7: Menor distância de Toy Story (1) até The Godfather (858) via tags em comum
+
+```sql
+WITH RECURSIVE
+movie_tag AS (SELECT DISTINCT movie_id, tag_id FROM user_movie_tags),
+busca (movie_id, nivel) AS (
+    SELECT 1, 0
+    UNION
+    SELECT b.movie_id, s.nivel + 1
+    FROM busca s
+    JOIN movie_tag a ON a.movie_id = s.movie_id
+    JOIN movie_tag b ON b.tag_id = a.tag_id
+    WHERE s.nivel < 4
+)
+SELECT MIN(nivel) AS distancia FROM busca WHERE movie_id = 858;
+```
+
+```cypher
+MATCH (a:Movie {movie_id: 1}), (b:Movie {movie_id: 858})
+MATCH p = shortestPath((a)-[:HAS_TAG*..10]-(b))
+RETURN length(p) / 2 AS distancia,
+       [n IN nodes(p) | coalesce(n.title, '#' + n.name)] AS caminho;
+```
+
+Esta é a consulta que melhor expõe a diferença entre os paradigmas:
+
+* **SQL não tem busca em grafo nativa**. A CTE recursiva simula uma busca em largura, mas:
+  1. **Não para ao encontrar o destino**: calcula todos os níveis até o limite (`nivel < 4`) e só depois filtra.
+  2. **Não tem um conjunto global de "já visitados"**: o `UNION` só descarta linhas idênticas `(filme, nível)`, então o mesmo filme é reprocessado em cada nível.
+  3. **Não devolve o caminho**: para isso seria preciso carregar um `ARRAY` com os filmes visitados em cada linha. Isso torna toda linha única, desativa a deduplicação do `UNION` e a consulta passa a crescer **exponencialmente** (cada caminho distinto vira uma linha). Na nossa primeira versão, com o caminho, a consulta não terminava em 60 segundos.
+* **O Neo4j executa `shortestPath` como um algoritmo nativo** (busca em largura bidirecional), que para no primeiro encontro e devolve o caminho completo, com as tags intermediárias.
+* A profundidade máxima também é diferente: 4 níveis no SQL (mais que isso fica caro) contra 10 no Cypher.
 
 ---
 
-## 4. Análise Comparativa Detalhada
+## 4. Resultados do Benchmark
 
-### 4.1. Esquema, Flexibilidade e Integridade
+O script [`scripts/benchmark.py`](../scripts/benchmark.py) executa cada consulta nos dois bancos (1 execução de aquecimento + mediana de 5) e grava a tabela em [`resultados_benchmark.md`](resultados_benchmark.md).
 
-| Critério | Relacional (PostgreSQL) | NoSQL Documental (MongoDB) |
+> **Preencher com os números da execução real** (`python scripts/benchmark.py`), indicando o volume de avaliações carregado (amostra de 100 mil ou base completa) e a máquina usada.
+
+O padrão esperado, observado num teste preliminar com **dados sintéticos** no formato do MovieLens (3 mil filmes, 100 mil avaliações), é:
+
+* **Consultas 1 a 4 (busca pontual e agregações)**: o **PostgreSQL** é mais rápido ou empata. Agregar sobre a base inteira favorece o armazenamento em tabelas contíguas, e as buscas pontuais são resolvidas por índices B-Tree nos dois bancos.
+* **Consultas 5 e 6 (1 a 2 saltos)**: o **PostgreSQL continua competitivo** (no teste, ficou próximo do Neo4j na 6 e foi mais rápido na 5). Com poucos saltos, junções indexadas são eficientes, e a vantagem do grafo aqui é a legibilidade da consulta, não o tempo.
+* **Consulta 7 (caminho de tamanho variável)**: o **Neo4j** é **duas ordens de grandeza** mais rápido e ainda devolve o caminho, que o SQL não consegue devolver a um custo razoável.
+
+A conclusão honesta é que o grafo **não** é "mais rápido" em geral: ele é mais rápido exatamente quando a pergunta é sobre **relações de profundidade variável**.
+
+---
+
+## 5. Análise Comparativa Detalhada
+
+### 5.1. Esquema, Flexibilidade e Integridade
+
+| Critério | Relacional (PostgreSQL) | Grafo (Neo4j) |
 | :--- | :--- | :--- |
-| **Definição de Esquema** | **Schema-on-Write**: Esquema rígido, validado antes da gravação no disco. | **Schema-on-Read / Dynamic**: O banco aceita estruturas heterogêneas sem migrações de DDL. |
-| **Evolução de Atributos** | Exige `ALTER TABLE`, bloqueios de tabela ou preenchimento de colunas nulas. | Novos campos podem ser adicionados a documentos futuros sem alterar os existentes. |
-| **Integridade Referencial** | Garantida nativamente pelo motor (`FOREIGN KEY`, `ON DELETE CASCADE`, `CHECK`). | Gerenciada pela camada de aplicação. Risco de documentos com referências órfãs. |
-| **Normalização** | Máxima (3FN). Zero redundância física nas tabelas canônicas. | Controlada. Desnormalização para leitura acelerada. |
+| **Definição de esquema** | *Schema-on-write*: tabelas e tipos definidos antes da carga. | Sem esquema obrigatório; rótulos e propriedades livres. Constraints opcionais. |
+| **Evolução** | Exige `ALTER TABLE` / migrações. | Novos tipos de nó ou aresta podem ser criados a qualquer momento, sem afetar os existentes. |
+| **Integridade referencial** | Garantida pelo motor (`FOREIGN KEY`, `ON DELETE CASCADE`, `CHECK`). | Arestas sempre ligam nós existentes (não há "FK órfã"), mas não há `CHECK` de domínio (ex.: nota entre 0,5 e 5) nem tipos obrigatórios. |
+| **Relacionamentos** | Calculados no momento da consulta (`JOIN`). | Armazenados fisicamente (ponteiros entre nós). |
+| **Relações ternárias** | Naturais (tabela com 3 chaves estrangeiras). | Exigem reificação em um nó intermediário. |
+
+### 5.2. Transações e Consistência
+
+* **PostgreSQL**: ACID completo. Uma operação composta (cadastrar usuário, registrar nota, aplicar tag) é gravada inteira ou revertida (`ROLLBACK`).
+* **Neo4j**: também é **ACID** — diferente de muitos NoSQL, toda escrita ocorre em transação, com isolamento *read committed*.
+* **Teorema CAP**: um servidor Neo4j isolado (como neste projeto) não tem partição de rede a considerar. Em cluster, o Neo4j replica as escritas por consenso (Raft) entre os servidores primários, priorizando **consistência** — comportamento tipicamente **CP**. Réplicas secundárias de leitura recebem os dados de forma assíncrona e podem estar ligeiramente atrasadas. O PostgreSQL com replicação síncrona também se comporta como CP; com replicação assíncrona, as réplicas de leitura podem ficar defasadas.
+
+### 5.3. Desempenho e Armazenamento
+
+1. **Custo de percorrer relações**: no relacional, cada `JOIN` é uma busca num índice B-Tree — custo **O(log n)** que cresce com o tamanho da tabela. No grafo, seguir uma aresta é seguir um ponteiro — custo **constante**, independente do tamanho total da base (*index-free adjacency*). Com 1 ou 2 saltos a diferença é pequena; com caminhos longos ela se multiplica a cada salto.
+2. **Agregações globais**: o relacional vence. Tabelas são armazenadas de forma contígua e compacta (`NUMERIC(2,1)`, `INTEGER`), ideais para varredura sequencial. O grafo armazena registros de tamanho fixo ligados por ponteiros, menos eficientes para "ler tudo".
+3. **Armazenamento**: cada aresta no Neo4j guarda ponteiros para os dois nós e para as arestas vizinhas, o que tende a ocupar **mais espaço** que a linha equivalente numa tabela relacional.
+4. **Carga em massa**: o `COPY` do PostgreSQL é extremamente eficiente. No Neo4j, a carga via Cypher (`UNWIND` em lotes) é mais lenta; para a base completa, o caminho recomendado seria o `neo4j-admin database import`, que monta os arquivos do grafo offline.
+5. **Escalabilidade**: ambos escalam principalmente **verticalmente** para escrita. Grafos são difíceis de particionar (*sharding*) justamente porque cortar o grafo quebra os caminhos — uma limitação estrutural do modelo.
 
 ---
 
-### 4.2. Transações e Propriedades ACID vs. Teorema CAP
+## 6. Matriz Síntese de Decisão
 
-* **PostgreSQL (ACID Estrito)**:
-  * **Atomicidade, Consistência, Isolamento e Durabilidade**: Assegura que uma operação complexa (ex: registrar um usuário, associar uma tag e computar uma nota) ou seja gravada em sua totalidade ou seja revertida (`ROLLBACK`).
-  * Ideal para ambientes transacionais bancários, contábeis e de estoque.
-* **MongoDB (Teorema CAP & BASE)**:
-  * **Classificação no CAP**: Sistema tipicamente **CP** (Consistência e Tolerância a Particionamento na réplica primária) ou ajustável para **AP** na leitura secundária com consistência eventual.
-  * **Atomicidade em Nível de Documento**: Toda alteração em um único documento (incluindo seus arrays e subdocumentos embutidos) é atômica nativamente.
-  * Possui transações multi-documento desde a versão 4.0, porém com custo de coordenação e travamento que contradiz o propósito original de máxima vazão horizontal do NoSQL.
-
----
-
-### 4.3. Desempenho e Armazenamento
-
-1. **Volume em Disco e Compressão**:
-   * O modelo relacional armazena tipos binários compactos (ex: `SMALLINT` ocupa 2 bytes; IDs inteiros ocupam 4 bytes).
-   * O formato BSON do MongoDB armazena o nome das chaves em cada documento (`"title"`, `"release_year"`, `"genres"`). Embora o motor WiredTiger aplique compressão Snappy/zlib eficiente, documentos BSON crus possuem uma pegada de memória superior à de tuplas relacionais puras.
-2. **Latência de Leitura**:
-   * **Vantagem Expressiva do MongoDB** nas telas de catálogo e detalhes: Uma única requisição HTTP para a API recupera o documento do filme pronto com gêneros, notas médias e links em uma única busca indexada.
-   * No relacional, a mesma tela exige a construção de um plano de junção com múltiplos escaneamentos de índices e agregação em tempo de execução.
-3. **Escrita em Massa**:
-   * O PostgreSQL com o comando `COPY` é extraordinariamente eficiente para inserções em massa tabulares.
-   * O MongoDB com `insert_many` em *shards* distribuídos permite particionamento horizontal (*sharding*) transparente para volumes que superam o limite de uma única máquina física.
+| Dimensão | Relacional (PostgreSQL) | Grafo (Neo4j) |
+| :--- | :--- | :--- |
+| Unidade de dado | Tabela / linha | Nó / aresta |
+| Normalização | Estrita até a 3FN | Não se aplica: relações são cidadãs de primeira classe |
+| Relacionamentos | `JOIN` calculado na consulta | Ponteiros armazenados |
+| Linguagem | SQL (declarativa, padrão ISO) | Cypher (declarativa, baseada em padrões; base do padrão ISO GQL) |
+| Agregações sobre a base inteira | **Forte** | Mais lento |
+| Caminhos de tamanho variável | CTE recursiva, cara e limitada | **Nativo** (`shortestPath`, `*1..n`) |
+| Integridade | FK, `CHECK`, tipos | Unicidade e existência; sem `CHECK` |
+| Transações | ACID | ACID |
+| Caso de uso no MovieLens | Catálogo, relatórios, BI | Recomendação, similaridade, exploração da rede |
 
 ---
 
-## 5. Matriz Síntese de Decisão
+## 7. Conclusão e Recomendações
 
-```text
-+-------------------------+---------------------------------+---------------------------------+
-| Dimensão                | SGBD Relacional (PostgreSQL)    | SGBD Documental (MongoDB)       |
-+-------------------------+---------------------------------+---------------------------------+
-| Paradigma Principal     | Tabelas, Tuplas e Relações      | Coleções e Documentos BSON/JSON |
-| Normalização            | Estrita até 3FN                 | Desnormalização estratégica     |
-| Operação de Junção      | Nativas, robustas e universais  | Evitadas ($lookup restrito)     |
-| Consultas Complexas     | SQL declarativo poderoso        | MQL e Aggregation Pipelines     |
-| Padrão de Escalabilidade| Vertical (Scale-Up)             | Horizontal nativo (Scale-Out)   |
-| Integridade de Dados    | No motor de banco de dados      | Delegada à camada de software   |
-| Caso de Uso no MovieLens| Relatórios corporativos e BI    | API REST de Catálogo e Streaming|
-+-------------------------+---------------------------------+---------------------------------+
-```
+1. **Quando adotar o modelo relacional (PostgreSQL)**:
+   * Quando as perguntas são principalmente **agregações** e relatórios sobre grandes volumes (médias, contagens, rankings).
+   * Quando a **integridade estrita** (tipos, domínios, chaves estrangeiras) é obrigatória.
+   * Para análises *ad hoc* de BI, em que as perguntas não são conhecidas de antemão.
 
----
+2. **Quando adotar o modelo em grafo (Neo4j)**:
+   * Quando as perguntas são sobre **conexões**: recomendação, "amigos de amigos", caminhos, comunidades, detecção de fraude.
+   * Quando o número de saltos é **variável ou desconhecido** na hora de escrever a consulta.
+   * Quando o modelo de relacionamentos muda com frequência (novos tipos de aresta sem migração).
 
-## 6. Conclusão e Recomendações Práticas
-
-1. **Quando adotar a Abordagem Relacional (PostgreSQL)**:
-   * Quando o modelo de negócios exigir relacionamentos de muitos-para-muitos complexos e imprevisíveis.
-   * Quando a consistência imediata e a ausência absoluta de dados órfãos forem mandatórias.
-   * Para análises ad-hoc de *Business Intelligence* (BI), onde analistas precisam cruzar tabelas de maneiras não antecipadas durante o design inicial.
-
-2. **Quando adotar a Abordagem NoSQL Documental (MongoDB)**:
-   * Em plataformas de streaming, e-commerces e catálogos interativos, onde a leitura rápida de objetos completos (*Aggregate Roots*) dita a experiência do usuário.
-   * Em arquiteturas de microsserviços onde cada serviço possui seu próprio modelo encapsulado e flexível.
-   * Quando o volume de dados ultrapassa a capacidade de armazenamento de um único nó e exige escalabilidade horizontal via *sharding*.
-
-3. **Arquitetura Moderna Recomendada (Persistência Poliglota)**:
-   * Em uma aplicação real de grande porte inspirada no MovieLens/Netflix, a melhor engenharia não escolhe um em detrimento do outro, mas adota **Persistência Poliglota**:
-     * **PostgreSQL**: Gerencia cadastros de usuários, transações de assinaturas e catálogo mestre com integridade estrita.
-     * **MongoDB / Document Store**: Serve a API pública com o catálogo desnormalizado e enriquecido para renderização ultra-rápida.
-     * **Redis**: Armazena em cache as sessões e os Top Filmes mais acessados.
+3. **Arquitetura recomendada (persistência poliglota)**: numa plataforma real inspirada no MovieLens, os dois convivem:
+   * **PostgreSQL** como fonte da verdade: cadastro de usuários, filmes, avaliações e assinaturas, com integridade estrita e relatórios.
+   * **Neo4j** alimentado a partir do PostgreSQL, servindo o motor de **recomendação** e a navegação "filmes parecidos".

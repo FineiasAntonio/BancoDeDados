@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+"""ETL MovieLens (data/raw/) -> PostgreSQL normalizado até a 3FN, via COPY."""
 import argparse
 import io
 import os
@@ -6,14 +7,15 @@ import time
 
 import pandas as pd
 
-from common import connect, extract_title_and_year
+from common import ROOT, connect, extract_title_and_year
 
 TABLES = ["users", "movies", "genres", "movie_genres", "movie_links",
           "tags", "user_movie_tags", "ratings"]
 
 
 def parse_args():
-    p.add_argument("--raw-dir", default="data/raw")
+    p = argparse.ArgumentParser(description="ETL MovieLens -> PostgreSQL (3FN)")
+    p.add_argument("--raw-dir", default=str(ROOT / "data" / "raw"))
     p.add_argument("--host", default="localhost")
     p.add_argument("--port", type=int, default=5432)
     p.add_argument("--db", default="movielens")
